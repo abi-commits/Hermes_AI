@@ -9,7 +9,7 @@ from hermes.core.exceptions import RAGError
 from hermes.services.vector_db import VectorDB
 
 if TYPE_CHECKING:
-    pass
+    import httpx
 
 logger = structlog.get_logger(__name__)
 
@@ -21,15 +21,21 @@ class RAGService:
     database to augment LLM responses with domain knowledge.
     """
 
-    def __init__(self, vector_db: VectorDB | None = None) -> None:
+    def __init__(
+        self,
+        vector_db: VectorDB | None = None,
+        http_client: "httpx.AsyncClient | None" = None,
+    ) -> None:
         """Initialize the RAG service.
 
         Args:
             vector_db: Vector database instance. If None, creates a new one.
+            http_client: Shared HTTP client for connection pooling.
         """
         self.settings = get_settings()
-        self.vector_db = vector_db or VectorDB()
+        self.vector_db = vector_db or VectorDB(http_client=http_client)
         self._logger = structlog.get_logger(__name__)
+        self._http_client = http_client
 
     async def retrieve(
         self,

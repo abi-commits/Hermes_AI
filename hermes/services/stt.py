@@ -31,12 +31,17 @@ class STTService:
     for converting audio to text in real-time.
     """
 
-    def __init__(self) -> None:
-        """Initialize the STT service."""
+    def __init__(self, http_client: "httpx.AsyncClient | None" = None) -> None:
+        """Initialize the STT service.
+
+        Args:
+            http_client: Shared HTTP client for connection pooling.
+        """
         self.settings = get_settings()
         self._client: DeepgramClient | None = None
         self._connection = None
         self._logger = structlog.get_logger(__name__)
+        self._http_client = http_client
 
         if not HAS_DEEPGRAM:
             self._logger.warning("deepgram_sdk_not_installed")
@@ -91,7 +96,8 @@ class STTService:
             # Use Deepgram REST API for non-streaming transcription
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            client = self._http_client or httpx.AsyncClient(timeout=30.0)
+            try:
                 response = await client.post(
                     "https://api.deepgram.com/v1/listen",
                     headers={
@@ -122,6 +128,9 @@ class STTService:
 
                 self._logger.debug("transcription_complete", transcript=transcript[:50])
                 return transcript
+            finally:
+                if not self._http_client:
+                    await client.aclose()
 
         except Exception as e:
             self._logger.error("transcription_failed", error=str(e))

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from hermes.api import health_router, metrics_router
+from hermes.services.container import ServiceContainer
 from hermes.websocket.handler import websocket_router
 
 logger = structlog.get_logger(__name__)
@@ -57,12 +58,20 @@ async def lifespan(app: FastAPI):
 
     # Startup: Initialize services
     try:
-        # Initialize vector database connection
-        from hermes.services.vector_db import VectorDB
+        # Initialize service container (shared across all calls)
+        container = ServiceContainer()
+        await container.start()
+        app.state.services = container
 
-        app.state.vector_db = VectorDB()
-        await app.state.vector_db.connect()
+        # Initialize vector database connection
+        app.state.vector_db = container.vector_db
+        await container.vector_db.connect()
         logger.info("vector_db_connected")
+
+        # Initialize connection manager with service container
+        from hermes.websocket.manager import ConnectionManager
+
+        app.state.connection_manager = ConnectionManager(services=container)
 
         # Initialize Redis connection
         import redis.asyncio as redis
@@ -81,9 +90,9 @@ async def lifespan(app: FastAPI):
         # Shutdown: Cleanup resources
         logger.info("shutdown")
 
-        if hasattr(app.state, "vector_db"):
-            await app.state.vector_db.disconnect()
-            logger.info("vector_db_disconnected")
+        if hasattr(app.state, "services"):
+            await app.state.services.stop()
+            logger.info("service_container_stopped")
 
         if hasattr(app.state, "redis"):
             await app.state.redis.close()
@@ -107,10 +116,16 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware
+    # CORS middleware — restrict origins in production
+    allowed_origins = ["*"]
+    if settings.is_production:
+        allowed_origins = [
+            f"https://{settings.app_name}.example.com",
+        ]
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

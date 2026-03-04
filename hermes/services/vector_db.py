@@ -9,7 +9,7 @@ from config import get_settings
 from hermes.core.exceptions import VectorDBError
 
 if TYPE_CHECKING:
-    pass
+    import httpx
 
 logger = structlog.get_logger(__name__)
 
@@ -21,12 +21,17 @@ class VectorDB:
     providers for storing and retrieving document embeddings.
     """
 
-    def __init__(self) -> None:
-        """Initialize the vector database service."""
+    def __init__(self, http_client: "httpx.AsyncClient | None" = None) -> None:
+        """Initialize the vector database service.
+
+        Args:
+            http_client: Shared HTTP client for connection pooling.
+        """
         self.settings = get_settings()
         self._logger = structlog.get_logger(__name__)
         self._client = None
         self._collection = None
+        self._http_client = http_client
 
     async def connect(self) -> None:
         """Connect to the vector database."""

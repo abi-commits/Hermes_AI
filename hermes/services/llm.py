@@ -24,11 +24,17 @@ class LLMService:
     context management and optional RAG integration.
     """
 
-    def __init__(self) -> None:
-        """Initialize the LLM service."""
+    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
+        """Initialize the LLM service.
+
+        Args:
+            http_client: Shared HTTP client for connection pooling.
+                         Creates a per-request client if not provided.
+        """
         self.settings = get_settings()
         self._logger = structlog.get_logger(__name__)
         self._api_base = "https://generativelanguage.googleapis.com/v1beta"
+        self._http_client = http_client
 
         if not self.settings.gemini_api_key:
             self._logger.warning("gemini_api_key_not_set")
@@ -101,7 +107,8 @@ class LLMService:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
+            client = self._http_client or httpx.AsyncClient(timeout=60.0)
+            try:
                 response = await client.post(
                     f"{self._api_base}/models/{self.settings.gemini_model}:generateContent",
                     headers={
@@ -140,6 +147,9 @@ class LLMService:
                 )
 
                 return text
+            finally:
+                if not self._http_client:
+                    await client.aclose()
 
         except httpx.TimeoutException as e:
             raise LLMError(f"Gemini API timeout: {e}")
@@ -208,18 +218,18 @@ class LLMService:
             },
         }
 
+        client = self._http_client or httpx.AsyncClient(timeout=60.0)
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    f"{self._api_base}/models/{self.settings.gemini_model}:streamGenerateContent",
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-goog-api-key": self.settings.gemini_api_key,
-                    },
-                    json=request_data,
-                    timeout=60.0,
-                ) as response:
+            async with client.stream(
+                "POST",
+                f"{self._api_base}/models/{self.settings.gemini_model}:streamGenerateContent",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.settings.gemini_api_key,
+                },
+                json=request_data,
+                timeout=60.0,
+            ) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
                         raise LLMError(
@@ -250,6 +260,9 @@ class LLMService:
         except Exception as e:
             self._logger.error("llm_stream_failed", error=str(e))
             raise LLMError(f"LLM stream generation failed: {e}")
+        finally:
+            if not self._http_client:
+                await client.aclose()
 
 
 class MockLLMService(LLMService):
