@@ -4,21 +4,24 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import structlog
 
+from hermes.api.metrics import MetricsCollector
 from hermes.core.audio import decode_mulaw, encode_mulaw
-from hermes.services.llm import LLMService
-from hermes.services.rag import RAGService
-from hermes.services.stt import STTService
-from hermes.services.tts import TTSService
+from hermes.utils.timing import Timer
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
+
+    from hermes.services.llm import LLMService
+    from hermes.services.rag import RAGService
+    from hermes.services.stt import STTService
+    from hermes.services.tts import TTSService
 
 logger = structlog.get_logger(__name__)
 
@@ -41,7 +44,7 @@ class ConversationTurn:
 
     role: str  # "user" or "assistant"
     content: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -61,6 +64,11 @@ class Call:
         stream_sid: str,
         websocket: "WebSocket",
         account_sid: str,
+        *,
+        stt_service: "STTService | None" = None,
+        llm_service: "LLMService | None" = None,
+        tts_service: "TTSService | None" = None,
+        rag_service: "RAGService | None" = None,
     ) -> None:
         """Initialize a new call.
 
@@ -69,6 +77,10 @@ class Call:
             stream_sid: Twilio media stream SID.
             websocket: WebSocket connection.
             account_sid: Twilio account SID.
+            stt_service: Speech-to-text service (injected).
+            llm_service: LLM service (injected).
+            tts_service: TTS service (injected).
+            rag_service: RAG service (injected).
         """
         self.call_sid = call_sid
         self.stream_sid = stream_sid
@@ -85,18 +97,18 @@ class Call:
 
         # Queues for async processing
         self.audio_in_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
-        self.text_out_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
-        self.audio_out_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
+        self.text_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
+        self.tts_text_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
 
         # Conversation history
         self.conversation: list[ConversationTurn] = []
         self.max_history = 20
 
-        # Services (initialized on start)
-        self.stt_service: STTService | None = None
-        self.llm_service: LLMService | None = None
-        self.tts_service: TTSService | None = None
-        self.rag_service: RAGService | None = None
+        # Services (injected)
+        self.stt_service: "STTService | None" = stt_service
+        self.llm_service: "LLMService | None" = llm_service
+        self.tts_service: "TTSService | None" = tts_service
+        self.rag_service: "RAGService | None" = rag_service
 
         # Background tasks
         self._tasks: set[asyncio.Task] = set()
@@ -124,16 +136,14 @@ class Call:
                 raise RuntimeError(f"Cannot start call from state {self._state}")
 
             self._state = CallState.CONNECTING
-            self.started_at = datetime.utcnow()
+            self.started_at = datetime.now(UTC)
             self._running = True
 
-            # Initialize services
-            self.stt_service = STTService()
-            self.llm_service = LLMService()
-            self.tts_service = TTSService()
-            self.rag_service = RAGService()
-
             self._logger.info("call_started")
+
+        # Record metrics
+        MetricsCollector.record_call_started()
+        MetricsCollector.record_websocket_connected()
 
         # Start background processing tasks
         self._start_tasks()
@@ -224,16 +234,19 @@ class Call:
                         # Decode mu-law to PCM
                         pcm_audio = decode_mulaw(combined)
 
-                        # Send to STT service
-                        transcript = await self.stt_service.transcribe(pcm_audio)
+                        # Send to STT service with timing
+                        with Timer("stt_transcribe") as t:
+                            transcript = await self.stt_service.transcribe(pcm_audio)
+                        MetricsCollector.record_stt_latency(t.elapsed or 0.0)
 
                         if transcript.strip():
-                            await self.text_out_queue.put(transcript)
+                            await self.text_queue.put(transcript)
                             self._logger.debug("stt_transcript", text=transcript)
 
         except asyncio.CancelledError:
             self._logger.info("stt_task_cancelled")
         except Exception as e:
+            MetricsCollector.record_stt_error(type(e).__name__)
             self._logger.error("stt_task_error", error=str(e))
 
     async def _llm_task(self) -> None:
@@ -246,7 +259,7 @@ class Call:
         try:
             while self._running:
                 # Wait for user input
-                user_text = await self.text_out_queue.get()
+                user_text = await self.text_queue.get()
 
                 # Transition to processing state
                 await self._transition_to(CallState.PROCESSING)
@@ -256,13 +269,15 @@ class Call:
                     ConversationTurn(role="user", content=user_text)
                 )
 
-                # Build context from history and RAG
-                context = self._build_context()
+                # Build context from history and RAG (async)
+                context = await self._build_context()
 
-                # Generate response
+                # Generate response with timing
                 response = ""
-                async for chunk in self.llm_service.generate_stream(context, user_text):
-                    response += chunk
+                with Timer("llm_generate") as t:
+                    async for chunk in self.llm_service.generate_stream(context, user_text):
+                        response += chunk
+                MetricsCollector.record_llm_latency(t.elapsed or 0.0)
 
                 # Add assistant response to history
                 self.conversation.append(
@@ -273,8 +288,8 @@ class Call:
                 if len(self.conversation) > self.max_history:
                     self.conversation = self.conversation[-self.max_history :]
 
-                # Queue for TTS
-                await self.audio_out_queue.put(response.encode())
+                # Queue text for TTS (typed str queue)
+                await self.tts_text_queue.put(response)
 
                 self._logger.debug("llm_response_generated", response=response[:100])
 
@@ -284,9 +299,10 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("llm_task_cancelled")
         except Exception as e:
+            MetricsCollector.record_llm_error(type(e).__name__)
             self._logger.error("llm_task_error", error=str(e))
 
-    def _build_context(self) -> str:
+    async def _build_context(self) -> str:
         """Build conversation context from history and RAG.
 
         Returns:
@@ -294,14 +310,17 @@ class Call:
         """
         context_parts = []
 
-        # Add RAG context if available
+        # Add RAG context if available (properly awaited)
         if self.rag_service and self.conversation:
             last_query = self.conversation[-1].content
-            rag_results = self.rag_service.retrieve(last_query)
-            if rag_results:
-                context_parts.append("Relevant information:")
-                for result in rag_results:
-                    context_parts.append(f"- {result}")
+            try:
+                rag_results = await self.rag_service.retrieve(last_query)
+                if rag_results:
+                    context_parts.append(
+                        self.rag_service.format_context(rag_results)
+                    )
+            except Exception as e:
+                self._logger.warning("rag_retrieval_skipped", error=str(e))
 
         # Add conversation history
         if len(self.conversation) > 1:
@@ -320,19 +339,21 @@ class Call:
 
         try:
             while self._running:
-                # Wait for text to synthesize
-                text_bytes = await self.audio_out_queue.get()
-                text = text_bytes.decode()
+                # Wait for text to synthesize (str queue)
+                text = await self.tts_text_queue.get()
 
                 # Transition to speaking state
                 await self._transition_to(CallState.SPEAKING)
 
-                # Generate audio
-                audio = await self.tts_service.synthesize(text)
+                # Generate audio with timing
+                with Timer("tts_synthesize") as t:
+                    audio = await self.tts_service.synthesize(text)
+                MetricsCollector.record_tts_latency(t.elapsed or 0.0)
 
                 # Encode to mu-law and send to Twilio
                 mulaw_audio = encode_mulaw(audio)
                 await self._send_audio(mulaw_audio)
+                MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
 
                 self._logger.debug("tts_audio_sent", text=text[:100])
 
@@ -342,6 +363,7 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("tts_task_cancelled")
         except Exception as e:
+            MetricsCollector.record_tts_error(type(e).__name__)
             self._logger.error("tts_task_error", error=str(e))
 
     async def _send_audio(self, audio: bytes) -> None:
@@ -392,7 +414,7 @@ class Call:
         """Repeat the last assistant message."""
         for turn in reversed(self.conversation):
             if turn.role == "assistant":
-                await self.audio_out_queue.put(turn.content.encode())
+                await self.tts_text_queue.put(turn.content)
                 break
 
     async def stop(self) -> None:
@@ -408,8 +430,13 @@ class Call:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        self.ended_at = datetime.utcnow()
+        self.ended_at = datetime.now(UTC)
         await self._transition_to(CallState.ENDED)
+
+        MetricsCollector.record_call_ended(
+            status="completed", duration=self.duration_seconds
+        )
+        MetricsCollector.record_websocket_disconnected()
 
         self._logger.info(
             "call_ended",

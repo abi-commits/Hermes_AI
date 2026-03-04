@@ -8,9 +8,9 @@ import structlog
 from fastapi import WebSocket, WebSocketDisconnect
 
 from hermes.core.call import Call
-from hermes.services.stt import STTService
 
 if TYPE_CHECKING:
+    from hermes.services.container import ServiceContainer
     from hermes.websocket.schemas import MediaMessage, StartMessage
 
 logger = structlog.get_logger(__name__)
@@ -21,18 +21,23 @@ class ConnectionManager:
 
     This class handles:
     - Active WebSocket connections keyed by call SID
-    - Call state machines
+    - Call state machines with injected services
     - Broadcasting messages to connections
     """
 
-    def __init__(self) -> None:
-        """Initialize the connection manager."""
+    def __init__(self, services: "ServiceContainer | None" = None) -> None:
+        """Initialize the connection manager.
+
+        Args:
+            services: Service container for dependency injection into calls.
+        """
         # Map of call_sid -> Call objects
         self._active_calls: dict[str, Call] = {}
         # Map of stream_sid -> call_sid for lookup
         self._stream_to_call: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._logger = structlog.get_logger(__name__)
+        self._services = services
 
     async def connect(
         self,
@@ -52,12 +57,16 @@ class ConnectionManager:
         stream_sid = start_message.start.stream_sid
 
         async with self._lock:
-            # Create new call state machine
+            # Create new call state machine with injected services
             call = Call(
                 call_sid=call_sid,
                 stream_sid=stream_sid,
                 websocket=websocket,
                 account_sid=start_message.start.account_sid,
+                stt_service=self._services.stt_service if self._services else None,
+                llm_service=self._services.llm_service if self._services else None,
+                tts_service=self._services.tts_service if self._services else None,
+                rag_service=self._services.rag_service if self._services else None,
             )
 
             self._active_calls[call_sid] = call
@@ -172,5 +181,13 @@ class ConnectionManager:
         self._logger.debug("active_calls_metrics", **metrics)
 
 
-# Global connection manager instance
-connection_manager = ConnectionManager()
+def get_connection_manager(services: "ServiceContainer | None" = None) -> ConnectionManager:
+    """Create a ConnectionManager with the given service container.
+
+    Args:
+        services: Service container for dependency injection.
+
+    Returns:
+        A new ConnectionManager instance.
+    """
+    return ConnectionManager(services=services)

@@ -3,7 +3,7 @@
 Provides liveness and readiness probes for Kubernetes and monitoring.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 from pydantic import BaseModel
 
 from config import get_settings
@@ -42,17 +42,42 @@ async def health_check() -> HealthResponse:
 
 
 @router.get("/ready", response_model=ReadinessResponse)
-async def readiness_check() -> ReadinessResponse:
+async def readiness_check(request: Request) -> ReadinessResponse:
     """Readiness probe - check if app is ready to serve requests.
 
     Returns:
         Readiness status with dependency checks.
     """
     checks: dict[str, bool] = {
-        "database": True,  # TODO: Check DB connection
-        "redis": True,     # TODO: Check Redis connection
-        "vector_db": True, # TODO: Check vector DB connection
+        "database": False,
+        "redis": False,
+        "vector_db": False,
     }
+
+    # Check Redis
+    try:
+        if hasattr(request.app.state, "redis"):
+            await request.app.state.redis.ping()
+            checks["redis"] = True
+    except Exception:
+        pass
+
+    # Check Vector DB
+    try:
+        if hasattr(request.app.state, "vector_db"):
+            stats = await request.app.state.vector_db.get_collection_stats()
+            checks["vector_db"] = stats.get("status") != "disconnected"
+    except Exception:
+        pass
+
+    # Check Database (basic import check for now)
+    try:
+        from hermes.models.base import get_engine
+
+        engine = get_engine()
+        checks["database"] = engine is not None
+    except Exception:
+        pass
 
     all_ready = all(checks.values())
 

@@ -24,10 +24,15 @@ class TTSService:
     natural-sounding voice responses.
     """
 
-    def __init__(self) -> None:
-        """Initialize the TTS service."""
+    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
+        """Initialize the TTS service.
+
+        Args:
+            http_client: Shared HTTP client for connection pooling.
+        """
         self.settings = get_settings()
         self._logger = structlog.get_logger(__name__)
+        self._http_client = http_client
 
     @retry(
         retry=retry_if_exception_type((TTSGenerationError, ConnectionError)),
@@ -69,7 +74,8 @@ class TTSService:
         Returns:
             Audio tensor.
         """
-        async with httpx.AsyncClient() as client:
+        client = self._http_client or httpx.AsyncClient(timeout=30.0)
+        try:
             response = await client.post(
                 f"{self.settings.chatterbox_api_url}/synthesize",
                 json={
@@ -99,6 +105,9 @@ class TTSService:
             audio_bytes = base64.b64decode(audio_data)
             audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
             return torch.from_numpy(audio_array)
+        finally:
+            if not self._http_client:
+                await client.aclose()
 
     async def _synthesize_openai(self, text: str) -> "torch.Tensor":
         """Synthesize using OpenAI TTS API.
@@ -112,7 +121,8 @@ class TTSService:
         if not self.settings.openai_api_key:
             raise ServiceUnavailableError("OpenAI TTS")
 
-        async with httpx.AsyncClient() as client:
+        client = self._http_client or httpx.AsyncClient(timeout=30.0)
+        try:
             response = await client.post(
                 "https://api.openai.com/v1/audio/speech",
                 headers={
@@ -140,6 +150,9 @@ class TTSService:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
             audio_array = audio_array / 32768.0  # Normalize to [-1, 1]
             return torch.from_numpy(audio_array)
+        finally:
+            if not self._http_client:
+                await client.aclose()
 
     async def synthesize_stream(
         self,

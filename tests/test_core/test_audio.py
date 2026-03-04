@@ -123,8 +123,8 @@ class TestGain:
 
     def test_normalize_audio(self):
         """Test audio normalization."""
-        audio = torch.tensor([0.1, 0.1, 0.1])
+        audio = torch.tensor([0.01, 0.01, 0.01])
         normalized = normalize_audio(audio, target_db=-20.0)
 
-        # Should be scaled up
+        # Should be scaled up (original is much quieter than -20 dBFS)
         assert normalized.abs().mean() > audio.abs().mean()
