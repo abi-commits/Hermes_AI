@@ -21,7 +21,7 @@ import structlog
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hermes.services.tts import TTSService
+from hermes.services.tts import ChatterboxTTSService
 
 logger = structlog.get_logger(__name__)
 
@@ -96,7 +96,7 @@ def generate_test_text(length: int) -> str:
     return text[:length].strip()
 
 
-async def benchmark_single(text: str, tts_service: TTSService) -> dict[str, Any]:
+async def benchmark_single(text: str, tts_service: ChatterboxTTSService) -> dict[str, Any]:
     """Benchmark a single TTS synthesis.
 
     Args:
@@ -109,17 +109,19 @@ async def benchmark_single(text: str, tts_service: TTSService) -> dict[str, Any]
     start_time = time.perf_counter()
 
     try:
-        audio = await tts_service.synthesize(text)
+        audio_bytes = await tts_service.generate(text)
         end_time = time.perf_counter()
 
         latency = end_time - start_time
-        audio_duration = len(audio) / 16000  # Assuming 16kHz output
+        # audio_bytes are int16: 2 bytes per sample
+        num_samples = len(audio_bytes) // 2
+        audio_duration = num_samples / tts_service.sample_rate
 
         return {
             "success": True,
             "latency": latency,
             "text_length": len(text),
-            "audio_samples": len(audio),
+            "audio_samples": num_samples,
             "audio_duration": audio_duration,
             "rtf": latency / audio_duration if audio_duration > 0 else 0,
         }
@@ -136,7 +138,7 @@ async def benchmark_text_length(
     length: int,
     samples: int,
     warmup: int,
-    tts_service: TTSService,
+    tts_service: ChatterboxTTSService,
 ) -> dict[str, Any]:
     """Benchmark TTS for a specific text length.
 
@@ -227,7 +229,7 @@ async def run_benchmark(args: argparse.Namespace) -> list[dict[str, Any]]:
 
         tts_service = MockTTSService(duration_seconds=0.1)
     else:
-        tts_service = TTSService()
+        tts_service = ChatterboxTTSService()
 
     logger.info(
         "starting_benchmark",

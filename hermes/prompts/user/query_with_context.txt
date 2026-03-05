@@ -1,0 +1,10 @@
+You are answering a caller's question using the following retrieved context.
+Use only the information below to answer.  If the context does not contain
+enough information, say so honestly.
+
+---
+Context:
+$context
+---
+
+Caller's question: $query

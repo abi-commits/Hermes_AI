@@ -3,8 +3,7 @@
 Exposes application metrics for monitoring and alerting.
 """
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from prometheus_client import (
@@ -15,9 +14,6 @@ from prometheus_client import (
     Info,
     generate_latest,
 )
-
-if TYPE_CHECKING:
-    pass
 
 router = APIRouter(tags=["metrics"])
 
@@ -107,8 +103,8 @@ AUDIO_BYTES = Counter(
 )
 
 
-# Set application info on startup
-APP_INFO.info({"version": "0.1.0", "name": "hermes"})
+# Set application info on startup (updated in lifespan with real version)
+APP_INFO.info({"version": "0.0.0", "name": "hermes"})
 
 
 class MetricsCollector:

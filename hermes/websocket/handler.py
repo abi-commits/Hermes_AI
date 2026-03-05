@@ -12,7 +12,6 @@ from hermes.websocket.schemas import (
     MediaMessage,
     StartMessage,
     StopMessage,
-    TwilioMessage,
 )
 
 logger = structlog.get_logger(__name__)

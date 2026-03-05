@@ -3,10 +3,11 @@
 Provides liveness and readiness probes for Kubernetes and monitoring.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 from pydantic import BaseModel
 
 from config import get_settings
+from hermes import __version__
 
 router = APIRouter(tags=["health"])
 
@@ -36,23 +37,32 @@ async def health_check() -> HealthResponse:
     settings = get_settings()
     return HealthResponse(
         status="healthy",
-        version="0.1.0",
+        version=__version__,
         environment=settings.app_env,
     )
 
 
 @router.get("/ready", response_model=ReadinessResponse)
-async def readiness_check() -> ReadinessResponse:
+async def readiness_check(request: Request) -> ReadinessResponse:
     """Readiness probe - check if app is ready to serve requests.
 
     Returns:
         Readiness status with dependency checks.
     """
-    checks: dict[str, bool] = {
-        "database": True,  # TODO: Check DB connection
-        "redis": True,     # TODO: Check Redis connection
-        "vector_db": True, # TODO: Check vector DB connection
-    }
+    checks: dict[str, bool] = {}
+
+    # Check RAG / ChromaDB connection
+    try:
+        rag = getattr(request.app.state, "rag_service", None)
+        if rag is not None:
+            checks["rag"] = True
+        else:
+            checks["rag"] = False
+    except Exception:
+        checks["rag"] = False
+
+    # Check TTS service
+    checks["tts"] = getattr(request.app.state, "tts_service", None) is not None
 
     all_ready = all(checks.values())
 
@@ -72,6 +82,6 @@ async def liveness_check() -> HealthResponse:
     settings = get_settings()
     return HealthResponse(
         status="alive",
-        version="0.1.0",
+        version=__version__,
         environment=settings.app_env,
     )

@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from hermes.main import create_app
-from hermes.services.llm import MockLLMService
+from hermes.services.llm import MockGeminiLLMService
 from hermes.services.stt import MockSTTService
 from hermes.services.tts import MockTTSService
 
@@ -48,9 +48,9 @@ def mock_stt_service() -> MockSTTService:
 
 
 @pytest.fixture
-def mock_llm_service() -> MockLLMService:
+def mock_llm_service() -> MockGeminiLLMService:
     """Create a mock LLM service."""
-    return MockLLMService(
+    return MockGeminiLLMService(
         responses=[
             "I can help you with that. Let me assist you.",
             "Is there anything else you need?",

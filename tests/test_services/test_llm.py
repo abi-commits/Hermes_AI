@@ -2,20 +2,21 @@
 
 import pytest
 
-from hermes.services.llm import MockLLMService
+from hermes.models.llm import InterruptMarker
+from hermes.services.llm import MockGeminiLLMService
 
 
-class TestMockLLMService:
-    """Tests for Mock LLM service."""
+class TestMockGeminiLLMService:
+    """Tests for Mock Gemini LLM service."""
 
     @pytest.mark.asyncio
     async def test_mock_generate_returns_response(self):
         """Test that mock service returns response."""
-        service = MockLLMService(responses=["Test response"])
+        service = MockGeminiLLMService(responses=["Test response"])
 
         result = await service.generate(
+            prompt="Test query",
             context="Some context",
-            query="Test query"
         )
 
         assert result == "Test response"
@@ -23,23 +24,32 @@ class TestMockLLMService:
     @pytest.mark.asyncio
     async def test_mock_generate_cycles_responses(self):
         """Test that mock service cycles through responses."""
-        service = MockLLMService(responses=["A", "B", "C"])
+        service = MockGeminiLLMService(responses=["A", "B", "C"])
 
         results = []
         for _ in range(4):
-            result = await service.generate("ctx", "query")
+            result = await service.generate(prompt="query")
             results.append(result)
 
         assert results == ["A", "B", "C", "A"]
 
     @pytest.mark.asyncio
-    async def test_mock_generate_stream_yields_chunks(self):
+    async def test_mock_stream_sentences_yields_chunks(self):
         """Test that mock stream yields chunks."""
-        service = MockLLMService(responses=["Hello world"])
+        service = MockGeminiLLMService(responses=["Hello world"])
 
         chunks = []
-        async for chunk in service.generate_stream("ctx", "query"):
+        async for chunk in service.stream_sentences(prompt="query"):
             chunks.append(chunk)
 
         assert len(chunks) > 0
-        assert "".join(chunks).strip() == "Hello world"
+        assert "".join(str(c) for c in chunks).strip() == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_mock_stream_no_interrupt_marker_by_default(self):
+        """Test that no InterruptMarker appears without an interruption check."""
+        service = MockGeminiLLMService(responses=["Quick reply"])
+
+        async for chunk in service.stream_sentences(prompt="q"):
+            assert not isinstance(chunk, InterruptMarker)
+

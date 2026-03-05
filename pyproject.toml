@@ -1,61 +1,75 @@
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.poetry]
+[project]
 name = "hermes"
 version = "0.1.0"
 description = "Hermes Voice Support Service - AI-powered voice assistance"
-authors = ["Your Name <you@example.com>"]
-readme = "README.md"
-packages = [{include = "hermes"}, {include = "config"}]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=14.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=24.4.0",
+    "prometheus-client>=0.21.0",
+    "numpy>=1.26.0",
+    "torch>=2.5.0",
+    "torchaudio>=2.5.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.14.0",
+    "chromadb>=0.5.0",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27.0",
+    "aiofiles>=24.1.0",
+    "tenacity>=9.0.0",
+    "twilio>=9.10.0",
+    "pyyaml>=6.0",
+    "langchain>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-community>=0.3.0",
+    "unstructured>=0.16.0",
+    "tiktoken>=0.7.0",
+    "rank-bm25>=0.2.2",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "^0.115.0"
-uvicorn = {extras = ["standard"], version = "^0.32.0"}
-websockets = "^14.0"
-pydantic = "^2.9.0"
-pydantic-settings = "^2.6.0"
-python-dotenv = "^1.0.0"
-structlog = "^24.4.0"
-prometheus-client = "^0.21.0"
-numpy = "^1.26.0"
-torch = "^2.5.0"
-torchaudio = "^2.5.0"
-sqlalchemy = "^2.0.0"
-alembic = "^1.14.0"
-chromadb = "^0.5.0"
-python-multipart = "^0.0.12"
-httpx = "^0.27.0"
-aiofiles = "^24.1.0"
-redis = "^5.2.0"
-celery = "^5.4.0"
-tenacity = "^9.0.0"
-twilio = "^9.10.0"
+[project.optional-dependencies]
+deepgram = ["deepgram-sdk>=3.7.0"]
+gemini = ["google-genai>=1.0.0"]
+openai = ["openai>=1.54.0"]
+chatterbox = ["chatterbox-tts>=0.1.0", "perth>=0.1.0"]
+all = [
+    "deepgram-sdk>=3.7.0",
+    "google-genai>=1.0.0",
+    "openai>=1.54.0",
+    "chatterbox-tts>=0.1.0",
+    "perth>=0.1.0",
+]
 
-# Optional dependencies for specific services
-deepgram-sdk = {version = "^3.7.0", optional = true}
-google-generativeai = {version = "^0.8.0", optional = true}
-openai = {version = "^1.54.0", optional = true}
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "black>=24.10.0",
+    "isort>=5.13.0",
+    "flake8>=7.1.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+    "httpx>=0.27.0",
+    "asgi-lifespan>=2.1.0",
+]
 
-[tool.poetry.extras]
-deepgram = ["deepgram-sdk"]
-gemini = ["google-generativeai"]
-openai = ["openai"]
-all = ["deepgram-sdk", "google-generativeai", "openai"]
+[tool.hatch.build.targets.wheel]
+packages = ["hermes", "config"]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.3.0"
-pytest-asyncio = "^0.24.0"
-pytest-cov = "^6.0.0"
-black = "^24.10.0"
-isort = "^5.13.0"
-flake8 = "^7.1.0"
-mypy = "^1.13.0"
-pre-commit = "^4.0.0"
-httpx = "^0.27.0"
-asgi-lifespan = "^2.1.0"
+[tool.hatch.build.targets.wheel.force-include]
+"hermes/prompts/system" = "hermes/prompts/system"
+"hermes/prompts/user" = "hermes/prompts/user"
+"hermes/prompts/few_shot" = "hermes/prompts/few_shot"
 
 [tool.black]
 line-length = 100

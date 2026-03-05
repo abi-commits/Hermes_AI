@@ -1,6 +1,5 @@
 """Audio processing utilities."""
 
-import struct
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,16 +10,11 @@ if TYPE_CHECKING:
     import torch
 
 
-# Mu-law encoding/decoding constants
-MU = 255.0
-MULAW_BIAS = 33.0
-
-
 def encode_mulaw(audio: "torch.Tensor | np.ndarray", bits: int = 8) -> bytes:
     """Encode audio to mu-law format.
 
-    Mu-law encoding is used by Twilio for audio transmission.
-    Formula: f(x) = ln(1 + mu * |x|) / ln(1 + mu) * sign(x)
+    Uses torchaudio's built-in mu-law encoding, which Twilio uses
+    for audio transmission.
 
     Args:
         audio: Input audio samples (normalized to [-1, 1]).
@@ -29,54 +23,41 @@ def encode_mulaw(audio: "torch.Tensor | np.ndarray", bits: int = 8) -> bytes:
     Returns:
         Mu-law encoded bytes.
     """
-    # Convert to numpy if needed
-    if isinstance(audio, torch.Tensor):
-        audio = audio.cpu().numpy()
+    # Convert to tensor if needed
+    if isinstance(audio, np.ndarray):
+        audio = torch.from_numpy(audio).float()
 
-    # Ensure float32
-    audio = audio.astype(np.float32)
+    audio = audio.float()
 
     # Normalize to [-1, 1] if needed
-    if audio.max() > 1.0 or audio.min() < -1.0:
-        audio = audio / np.abs(audio).max()
+    peak = audio.abs().max()
+    if peak > 1.0:
+        audio = audio / peak
 
-    # Mu-law encode
-    mu = (1 << bits) - 1  # 255 for 8-bit
+    quantization_channels = 1 << bits  # 256 for 8-bit
+    encoded = torchaudio.functional.mu_law_encoding(audio, quantization_channels)
 
-    # Apply mu-law compression
-    magnitude = np.log1p(mu * np.abs(audio)) / np.log1p(mu)
-    encoded = np.sign(audio) * magnitude
-
-    # Quantize to 8-bit unsigned
-    encoded = ((encoded + 1.0) / 2.0 * mu + 0.5).astype(np.uint8)
-
-    return encoded.tobytes()
+    return encoded.to(torch.uint8).cpu().numpy().tobytes()
 
 
 def decode_mulaw(data: bytes, bits: int = 8) -> "torch.Tensor":
     """Decode mu-law audio to PCM.
+
+    Uses torchaudio's built-in mu-law decoding.
 
     Args:
         data: Mu-law encoded bytes.
         bits: Number of bits for encoding (default 8).
 
     Returns:
-        Decoded audio as PyTorch tensor.
+        Decoded audio as PyTorch tensor in range [-1.0, 1.0].
     """
-    # Convert bytes to numpy array
-    encoded = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+    encoded = torch.from_numpy(
+        np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+    )
+    quantization_channels = 1 << bits  # 256 for 8-bit
 
-    mu = (1 << bits) - 1  # 255 for 8-bit
-
-    # Dequantize
-    encoded = encoded / mu * 2.0 - 1.0
-
-    # Apply mu-law expansion
-    magnitude = (1.0 / mu) * ((1.0 + mu) ** np.abs(encoded) - 1.0)
-    decoded = np.sign(encoded) * magnitude
-
-    # Convert to PyTorch tensor
-    return torch.from_numpy(decoded).float()
+    return torchaudio.functional.mu_law_decoding(encoded, quantization_channels)
 
 
 def resample_audio(
@@ -164,8 +145,7 @@ def apply_gain(audio: "torch.Tensor", gain_db: float) -> "torch.Tensor":
     Returns:
         Audio with applied gain.
     """
-    gain = 10 ** (gain_db / 20.0)
-    return audio * gain
+    return torchaudio.functional.gain(audio, gain_db)
 
 
 def normalize_audio(audio: "torch.Tensor", target_db: float = -20.0) -> "torch.Tensor":
@@ -238,23 +218,18 @@ def detect_silence(
     Returns:
         List of (start, end) tuples for silent regions.
     """
-    # Find samples below threshold
-    is_silent = torch.abs(audio) < threshold
+    # Vectorised edge detection instead of per-sample Python loop
+    is_silent = (torch.abs(audio) < threshold).int()
 
-    # Find silent regions
-    silent_regions = []
-    start = None
+    # Pad with zeros so edges at the very start / end are detected
+    padded = torch.nn.functional.pad(is_silent, (1, 1), value=0)
+    diff = padded[1:] - padded[:-1]
 
-    for i, silent in enumerate(is_silent):
-        if silent and start is None:
-            start = i
-        elif not silent and start is not None:
-            if i - start >= min_duration:
-                silent_regions.append((start, i))
-            start = None
+    starts = torch.where(diff == 1)[0]
+    ends = torch.where(diff == -1)[0]
 
-    # Handle trailing silence
-    if start is not None and len(audio) - start >= min_duration:
-        silent_regions.append((start, len(audio)))
+    # Filter by minimum duration
+    durations = ends - starts
+    mask = durations >= min_duration
 
-    return silent_regions
+    return list(zip(starts[mask].tolist(), ends[mask].tolist()))

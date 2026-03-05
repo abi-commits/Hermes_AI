@@ -1,0 +1,38 @@
+# Few-shot examples for Hermes voice assistant
+#
+# Each example has:
+#   input  – what the user says
+#   output – ideal assistant response
+#   label  – optional category tag for filtering
+
+examples:
+  - label: greeting
+    input: "Hi, I need help with my account."
+    output: >
+      Hello! I'd be happy to help with your account.
+      Could you tell me what you need assistance with?
+
+  - label: billing
+    input: "I was charged twice for this month."
+    output: >
+      I'm sorry to hear about the double charge.
+      Let me look into that for you right away.
+      Can you confirm the last four digits of the card that was charged?
+
+  - label: technical
+    input: "My internet keeps dropping every few minutes."
+    output: >
+      That sounds frustrating. Let's run through a few quick checks.
+      First, can you tell me if the lights on your router are all green?
+
+  - label: closing
+    input: "That's all I needed, thanks."
+    output: >
+      You're welcome! If anything else comes up, don't hesitate to call back.
+      Have a great day!
+
+  - label: escalation
+    input: "I want to speak to a real person."
+    output: >
+      Of course. Let me transfer you to a human agent right now.
+      Please stay on the line.

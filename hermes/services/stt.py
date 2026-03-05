@@ -1,7 +1,5 @@
 """Speech-to-Text service integration."""
 
-import base64
-import struct
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 

@@ -1,6 +1,6 @@
 """FastAPI application factory and lifespan management."""
 
-import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import structlog
@@ -8,7 +8,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
+from hermes import __version__
 from hermes.api import health_router, metrics_router
+from hermes.api.metrics import APP_INFO, MetricsCollector
+from hermes.services.rag import ChromaRAGService
+from hermes.services.tts import ChatterboxTTSService
 from hermes.websocket.handler import websocket_router
 
 logger = structlog.get_logger(__name__)
@@ -53,23 +57,35 @@ async def lifespan(app: FastAPI):
         app_name=settings.app_name,
         environment=settings.app_env,
         debug=settings.debug,
+        version=__version__,
     )
 
     # Startup: Initialize services
     try:
-        # Initialize vector database connection
-        from hermes.services.vector_db import VectorDB
+        # Initialize ChromaRAG service
+        app.state.rag_service = ChromaRAGService()
+        logger.info("rag_service_initialized")
 
-        app.state.vector_db = VectorDB()
-        await app.state.vector_db.connect()
-        logger.info("vector_db_connected")
+        # Initialize TTS service with thread pool
+        tts_executor = ThreadPoolExecutor(
+            max_workers=settings.chatterbox_num_workers,
+            thread_name_prefix="tts-worker",
+        )
+        app.state.tts_executor = tts_executor
+        app.state.tts_service = ChatterboxTTSService(
+            device=settings.chatterbox_device,
+            watermark_key=(
+                bytes.fromhex(settings.chatterbox_watermark_key)
+                if settings.chatterbox_watermark_key
+                else None
+            ),
+            num_workers=settings.chatterbox_num_workers,
+        )
+        app.state.tts_service.set_executor(tts_executor)
+        logger.info("tts_service_initialized", device=settings.chatterbox_device)
 
-        # Initialize Redis connection
-        import redis.asyncio as redis
-
-        app.state.redis = redis.from_url(str(settings.redis_url))
-        await app.state.redis.ping()
-        logger.info("redis_connected")
+        # Update Prometheus app info
+        APP_INFO.info({"version": __version__, "name": settings.app_name})
 
         yield
 
@@ -81,13 +97,9 @@ async def lifespan(app: FastAPI):
         # Shutdown: Cleanup resources
         logger.info("shutdown")
 
-        if hasattr(app.state, "vector_db"):
-            await app.state.vector_db.disconnect()
-            logger.info("vector_db_disconnected")
-
-        if hasattr(app.state, "redis"):
-            await app.state.redis.close()
-            logger.info("redis_disconnected")
+        if hasattr(app.state, "tts_executor"):
+            app.state.tts_executor.shutdown(wait=False)
+            logger.info("tts_executor_shutdown")
 
 
 def create_app() -> FastAPI:
@@ -101,16 +113,17 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
+        version=__version__,
         description="AI-powered voice support service",
         debug=settings.debug,
         lifespan=lifespan,
     )
 
-    # CORS middleware
+    # CORS middleware — restrict origins in production
+    allowed_origins = ["*"] if settings.is_development else [f"https://{settings.host}"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

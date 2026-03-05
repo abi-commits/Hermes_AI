@@ -58,8 +58,8 @@ class RAGError(HermesError):
     pass
 
 
-class VectorDBError(HermesError):
-    """Errors from vector database operations."""
+class RAGRetrievalError(RAGError):
+    """Raised when retrieval from the vector database fails."""
 
     pass
 

@@ -1,14 +1,12 @@
 """WebSocket connection manager for active calls."""
 
 import asyncio
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import WebSocket, WebSocketDisconnect
 
 from hermes.core.call import Call
-from hermes.services.stt import STTService
 
 if TYPE_CHECKING:
     from hermes.websocket.schemas import MediaMessage, StartMessage

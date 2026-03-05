@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
         description="Gemini API key",
     )
     gemini_model: str = Field(
-        default="gemini-1.5-flash",
+        default="gemini-2.5-flash",
         description="Gemini model to use",
     )
     gemini_temperature: float = Field(
@@ -93,21 +93,24 @@ class Settings(BaseSettings):
     )
 
     # ==========================================================================
-    # Text-to-Speech (Chatterbox)
+    # Text-to-Speech (Chatterbox Turbo)
     # ==========================================================================
-    chatterbox_api_url: str = Field(
-        default="http://localhost:8001",
-        description="Chatterbox TTS API URL",
+    chatterbox_device: str = Field(
+        default="auto",
+        description="Device for Chatterbox Turbo model ('auto', 'cuda', 'cpu', 'mps')",
     )
-    chatterbox_voice: str = Field(
-        default="default",
-        description="Voice to use for TTS",
+    chatterbox_reference_audio: str | None = Field(
+        default=None,
+        description="Path to reference audio file for voice cloning",
     )
-    chatterbox_speed: float = Field(
-        default=1.0,
-        ge=0.5,
-        le=2.0,
-        description="Speech speed multiplier",
+    chatterbox_watermark_key: str | None = Field(
+        default=None,
+        description="Hex-encoded secret key for Perth audio watermarking (None to disable)",
+    )
+    chatterbox_num_workers: int = Field(
+        default=1,
+        ge=1,
+        description="Number of concurrent TTS generation threads",
     )
 
     # Alternative TTS providers
@@ -134,6 +137,24 @@ class Settings(BaseSettings):
         description="ChromaDB collection name",
     )
 
+    # Chroma Cloud settings
+    chroma_cloud_url: str | None = Field(
+        default=None,
+        description="Chroma Cloud instance URL (enables cloud mode when set)",
+    )
+    chroma_cloud_api_key: str | None = Field(
+        default=None,
+        description="Chroma Cloud API key for authentication",
+    )
+    chroma_tenant: str = Field(
+        default="default",
+        description="Chroma Cloud tenant",
+    )
+    chroma_database: str = Field(
+        default="default",
+        description="Chroma Cloud database",
+    )
+
     # Pinecone settings
     pinecone_api_key: str | None = Field(default=None, description="Pinecone API key")
     pinecone_environment: str | None = Field(
@@ -143,14 +164,6 @@ class Settings(BaseSettings):
     pinecone_index: str = Field(
         default="hermes-knowledge",
         description="Pinecone index name",
-    )
-
-    # ==========================================================================
-    # Redis
-    # ==========================================================================
-    redis_url: RedisDsn = Field(
-        default="redis://localhost:6379/0",
-        description="Redis connection URL",
     )
 
     # ==========================================================================
@@ -200,9 +213,55 @@ class Settings(BaseSettings):
         le=1.0,
         description="Minimum similarity score for RAG results",
     )
+    rag_chunk_size: int = Field(
+        default=1000,
+        ge=100,
+        description="Default chunk size in characters (or tokens if token splitting is enabled)",
+    )
+    rag_chunk_overlap: int = Field(
+        default=200,
+        ge=0,
+        description="Default overlap between consecutive chunks",
+    )
+    rag_use_token_splitting: bool = Field(
+        default=False,
+        description="Use token-based splitting (tiktoken) instead of character-based",
+    )
+    rag_token_encoding: str = Field(
+        default="cl100k_base",
+        description="Tiktoken encoding name for token-based splitting",
+    )
+    rag_enable_hybrid_retrieval: bool = Field(
+        default=False,
+        description="Enable hybrid retrieval combining dense (Chroma) and sparse (BM25) search",
+    )
+    rag_bm25_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight for BM25 results in hybrid retrieval (dense weight = 1 - this)",
+    )
+    rag_deduplication: bool = Field(
+        default=True,
+        description="Skip adding documents whose IDs already exist in the collection",
+    )
     embedding_model: str = Field(
         default="sentence-transformers/all-MiniLM-L6-v2",
         description="Model for text embeddings",
+    )
+
+    # Observability / tracing
+    rag_enable_tracing: bool = Field(
+        default=False,
+        description="Enable structured retrieval tracing logs with latency metrics",
+    )
+    langsmith_api_key: str | None = Field(
+        default=None,
+        description="LangSmith API key for LangChain tracing (optional)",
+    )
+    langsmith_project: str = Field(
+        default="hermes",
+        description="LangSmith project name",
     )
 
     @field_validator("audio_sample_rate")

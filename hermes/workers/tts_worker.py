@@ -6,14 +6,13 @@ the main WebSocket task and allows for pooling/batching.
 """
 
 import asyncio
-import json
 from collections.abc import Callable
 from typing import Any
 
 import structlog
 
 from config import get_settings
-from hermes.services.tts import MockTTSService, TTSService
+from hermes.services.tts import ChatterboxTTSService
 
 logger = structlog.get_logger(__name__)
 
@@ -52,7 +51,7 @@ class TTSJob:
 class TTSWorker:
     """Background worker for TTS generation.
 
-    This worker consumes TTS jobs from a Redis queue or in-memory queue
+    This worker consumes TTS jobs from an in-memory queue
     and processes them using the TTS service.
     """
 
@@ -60,24 +59,21 @@ class TTSWorker:
         self,
         queue: "asyncio.Queue[TTSJob] | None" = None,
         max_workers: int = 2,
-        use_redis: bool = False,
     ) -> None:
         """Initialize the TTS worker.
 
         Args:
             queue: Queue to consume jobs from. Creates one if None.
             max_workers: Number of concurrent workers.
-            use_redis: Whether to use Redis for job queue.
         """
         self.settings = get_settings()
         self._logger = structlog.get_logger(__name__)
         self.max_workers = max_workers
-        self.use_redis = use_redis
 
         self._queue = queue or asyncio.Queue()
         self._running = False
         self._workers: set[asyncio.Task] = set()
-        self._tts_service: TTSService | None = None
+        self._tts_service: ChatterboxTTSService | None = None
 
         # Metrics
         self.jobs_processed = 0
@@ -87,12 +83,11 @@ class TTSWorker:
     async def start(self) -> None:
         """Start the TTS worker."""
         self._running = True
-        self._tts_service = TTSService()
+        self._tts_service = ChatterboxTTSService()
 
         self._logger.info(
             "tts_worker_started",
             max_workers=self.max_workers,
-            use_redis=self.use_redis,
         )
 
         # Start worker tasks
@@ -168,13 +163,8 @@ class TTSWorker:
                 priority=job.priority,
             )
 
-            # Generate audio
-            audio_tensor = await self._tts_service.synthesize(job.text)
-
-            # Convert tensor to bytes
-            import numpy as np
-
-            audio_bytes = (audio_tensor.numpy() * 32767).astype(np.int16).tobytes()
+            # Generate audio (returns 16-bit PCM bytes directly)
+            audio_bytes = await self._tts_service.generate(job.text)
             job.audio = audio_bytes
 
             # Call callback if provided

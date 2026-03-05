@@ -16,15 +16,12 @@ services:
     environment:
       - APP_ENV=production
       - DATABASE_URL=postgresql://hermes:hermes@db:5432/hermes
-      - REDIS_URL=redis://redis:6379/0
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8002
     env_file:
       - .env
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       chromadb:
         condition: service_started
@@ -50,12 +47,8 @@ services:
     command: python -m hermes.workers.tts_worker
     environment:
       - APP_ENV=production
-      - REDIS_URL=redis://redis:6379/0
     env_file:
       - .env
-    depends_on:
-      redis:
-        condition: service_healthy
     networks:
       - hermes-network
 
@@ -80,26 +73,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U hermes -d hermes"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  # ===========================================================================
-  # Redis Cache & Queue
-  # ===========================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: hermes-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
-    networks:
-      - hermes-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
       retries: 5
 
   # ===========================================================================
@@ -163,7 +136,6 @@ services:
 # =============================================================================
 volumes:
   postgres_data:
-  redis_data:
   chroma_data:
   prometheus_data:
   grafana_data:

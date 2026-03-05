@@ -1,5 +1,6 @@
 """Timing utilities for profiling."""
 
+import asyncio
 import functools
 import time
 from collections.abc import Callable
@@ -94,7 +95,3 @@ def timed(func: F | None = None, *, name: str | None = None, log_level: str = "d
     if func is None:
         return decorator  # type: ignore
     return decorator(func)
-
-
-# Need to import asyncio here for the check above
-import asyncio
