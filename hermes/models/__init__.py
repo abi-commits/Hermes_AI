@@ -11,10 +11,7 @@ from hermes.models.llm import (
     InterruptMarker,
     LLMConfig,
     LLMGenerationError,
-    ResponseModality,
-    StreamingMode,
 )
-from hermes.models.llm import ConversationTurn as LLMConversationTurn
 from hermes.models.prompts import FewShotExample, SystemPrompt
 
 __all__ = [
@@ -24,10 +21,7 @@ __all__ = [
     # llm
     "InterruptMarker",
     "LLMConfig",
-    "LLMConversationTurn",
     "LLMGenerationError",
-    "ResponseModality",
-    "StreamingMode",
     # prompts
     "FewShotExample",
     "SystemPrompt",

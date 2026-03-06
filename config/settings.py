@@ -52,6 +52,10 @@ class Settings(BaseSettings):
         default=None,
         description="Twilio phone number",
     )
+    twilio_transfer_number: str | None = Field(
+        default=None,
+        description="E.164 phone number to transfer calls to when the caller presses 0 (e.g. +15550001234)",
+    )
 
     # ==========================================================================
     # Speech-to-Text (Deepgram)
@@ -111,6 +115,54 @@ class Settings(BaseSettings):
         default=1,
         ge=1,
         description="Number of concurrent TTS generation threads",
+    )
+
+    # ==========================================================================
+    # Text-to-Speech (CosyVoice2) — HTTP client settings
+    # ==========================================================================
+    cosyvoice2_host: str = Field(
+        default="localhost",
+        description="Hostname of the CosyVoice2 FastAPI server",
+    )
+    cosyvoice2_port: int = Field(
+        default=50000,
+        description="Port of the CosyVoice2 FastAPI server",
+    )
+    cosyvoice2_mode: str = Field(
+        default="zero_shot",
+        description="Inference mode: 'sft', 'zero_shot', 'cross_lingual', 'instruct2'",
+    )
+    cosyvoice2_spk_id: str = Field(
+        default="中文女",
+        description="Speaker ID for CosyVoice2 SFT mode",
+    )
+    cosyvoice2_prompt_text: str = Field(
+        default="",
+        description="Default prompt text for CosyVoice2 zero-shot voice cloning",
+    )
+    cosyvoice2_prompt_wav: str | None = Field(
+        default=None,
+        description="Path to reference WAV for CosyVoice2 zero-shot voice cloning",
+    )
+    cosyvoice2_instruct_text: str = Field(
+        default="",
+        description="Instruction text for CosyVoice2 instruct2 mode",
+    )
+    cosyvoice2_speed: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=2.0,
+        description="CosyVoice2 speech speed multiplier",
+    )
+    cosyvoice2_timeout: float = Field(
+        default=60.0,
+        description="HTTP request timeout (seconds) for CosyVoice2 server",
+    )
+
+    # TTS provider selection
+    tts_provider: str = Field(
+        default="chatterbox",
+        description="Active TTS provider: 'chatterbox' or 'cosyvoice2'",
     )
 
     # Alternative TTS providers
@@ -213,6 +265,21 @@ class Settings(BaseSettings):
         le=1.0,
         description="Minimum similarity score for RAG results",
     )
+    rag_query_timeout_s: float = Field(
+        default=2.0,
+        ge=0.1,
+        description="Maximum seconds to wait for RAG retrieval before proceeding without context",
+    )
+    rag_cache_ttl_s: float = Field(
+        default=300.0,
+        ge=0.0,
+        description="TTL in seconds for RAG query cache (0 to disable)",
+    )
+    rag_cache_max_size: int = Field(
+        default=128,
+        ge=0,
+        description="Maximum number of cached RAG query results (0 to disable)",
+    )
     rag_chunk_size: int = Field(
         default=1000,
         ge=100,
@@ -267,7 +334,7 @@ class Settings(BaseSettings):
     @field_validator("audio_sample_rate")
     @classmethod
     def validate_sample_rate(cls, v: int) -> int:
-        """Validate audio sample rate."""
+        """Validate audio sample rate is one of the supported values."""
         valid_rates = [8000, 16000, 22050, 44100, 48000]
         if v not in valid_rates:
             raise ValueError(f"Sample rate must be one of {valid_rates}")
@@ -275,20 +342,16 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        """Check if running in production environment."""
+        """``True`` when running in production."""
         return self.app_env == "production"
 
     @property
     def is_development(self) -> bool:
-        """Check if running in development environment."""
+        """``True`` when running in development."""
         return self.app_env == "development"
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance.
-
-    Returns:
-        Settings: Application settings instance.
-    """
+    """Return the cached application settings instance."""
     return Settings()

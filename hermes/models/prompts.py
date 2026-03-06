@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SystemPrompt:
-    """Parsed representation of a system prompt YAML file."""
+    """Parsed system prompt YAML."""
 
     name: str
     description: str
@@ -18,7 +18,7 @@ class SystemPrompt:
 
 @dataclass(frozen=True)
 class FewShotExample:
-    """A single input → output example used for few-shot prompting."""
+    """A single input/output example for few-shot prompting."""
 
     input: str
     output: str

@@ -1,7 +1,4 @@
-"""Health check endpoints.
-
-Provides liveness and readiness probes for Kubernetes and monitoring.
-"""
+"""Health check endpoints (liveness and readiness probes)."""
 
 from fastapi import APIRouter, Request, status
 from pydantic import BaseModel
@@ -29,11 +26,7 @@ class ReadinessResponse(BaseModel):
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Liveness probe - basic health check.
-
-    Returns:
-        Health status of the application.
-    """
+    """Liveness probe."""
     settings = get_settings()
     return HealthResponse(
         status="healthy",
@@ -44,11 +37,7 @@ async def health_check() -> HealthResponse:
 
 @router.get("/ready", response_model=ReadinessResponse)
 async def readiness_check(request: Request) -> ReadinessResponse:
-    """Readiness probe - check if app is ready to serve requests.
-
-    Returns:
-        Readiness status with dependency checks.
-    """
+    """Readiness probe — checks if RAG and TTS services are initialised."""
     checks: dict[str, bool] = {}
 
     # Check RAG / ChromaDB connection
@@ -74,11 +63,7 @@ async def readiness_check(request: Request) -> ReadinessResponse:
 
 @router.get("/live", response_model=HealthResponse, status_code=status.HTTP_200_OK)
 async def liveness_check() -> HealthResponse:
-    """Liveness probe - check if app is running.
-
-    Returns:
-        Liveness status.
-    """
+    """Liveness probe."""
     settings = get_settings()
     return HealthResponse(
         status="alive",

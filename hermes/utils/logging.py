@@ -6,17 +6,10 @@ from typing import Any
 
 
 class JSONFormatter(logging.Formatter):
-    """JSON log formatter for structured logging."""
+    """Formats log records as JSON."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON.
-
-        Args:
-            record: Log record.
-
-        Returns:
-            JSON formatted log string.
-        """
+        """Return the log record serialised as a JSON string."""
         log_data: dict[str, Any] = {
             "timestamp": self.formatTime(record),
             "level": record.levelname,
@@ -60,12 +53,7 @@ class JSONFormatter(logging.Formatter):
 
 
 def configure_logging(log_level: str = "INFO", json_format: bool = False) -> None:
-    """Configure application logging.
-
-    Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-        json_format: Whether to use JSON formatting.
-    """
+    """Configure root logger with the given level and optionally JSON output."""
     level = getattr(logging, log_level.upper(), logging.INFO)
 
     formatter: logging.Formatter

@@ -23,28 +23,9 @@ class LLMGenerationError(Exception):
 
 
 class InterruptMarker:
-    """Special marker to signal an interruption event to the LLM stream."""
+    """Sentinel yielded by the LLM stream to signal a barge-in interrupt."""
 
     pass
-
-
-# ======================================================================
-# Enums
-# ======================================================================
-
-
-class ResponseModality(Enum):
-    """Output modalities supported by Gemini."""
-
-    TEXT = "TEXT"
-    AUDIO = "AUDIO"  # Requires Live API with native audio
-
-
-class StreamingMode(Enum):
-    """Different streaming approaches for different latency requirements."""
-
-    STANDARD = "standard"  # Regular streaming via generate_content
-    LIVE = "live"  # Live API for bidirectional audio (lowest latency)
 
 
 # ======================================================================
@@ -54,7 +35,7 @@ class StreamingMode(Enum):
 
 @dataclass
 class ConversationTurn:
-    """Represents a single turn in the conversation history."""
+    """A single turn in the conversation history."""
 
     role: str  # "user" or "assistant"
     content: str
@@ -63,23 +44,13 @@ class ConversationTurn:
 
 @dataclass
 class LLMConfig:
-    """Configuration for the LLM service."""
+    """Generation parameters for the LLM service."""
 
     model_name: str = "gemini-2.5-flash"
     temperature: float = 0.7
     max_output_tokens: int = 2048
     top_p: float = 0.95
     top_k: int = 40
-    response_modality: ResponseModality = ResponseModality.TEXT
-    streaming_mode: StreamingMode = StreamingMode.STANDARD
 
-    # Live API specific settings
-    voice_name: str | None = "charon"  # Chirp 3 HD voices: charon, puck, etc.
-    language_code: str = "en-US"
-
-    # VAD settings for interruption handling
-    vad_enabled: bool = True
-    vad_start_sensitivity: str = "START_SENSITIVITY_LOW"  # or HIGH
-    vad_end_sensitivity: str = "END_SENSITIVITY_LOW"  # or HIGH
-    vad_prefix_padding_ms: int = 20
-    vad_silence_duration_ms: int = 100
+    # Reliability
+    timeout_s: float = 60.0  # Per-request timeout in seconds

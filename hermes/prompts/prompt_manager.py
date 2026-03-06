@@ -1,22 +1,4 @@
-"""Prompt Manager — load, cache, and render prompt templates.
-
-Prompts are stored as YAML (system personas) or plain-text Jinja2 templates
-(user / few-shot) under the ``hermes/prompts/`` directory tree.
-
-Directory layout::
-
-    hermes/prompts/
-    ├── system/          # YAML persona files (system_prompt + gen params)
-    │   ├── default.yaml
-    │   ├── polite.yaml
-    │   ├── technical.yaml
-    │   └── concise.yaml
-    ├── user/            # Jinja2 .txt templates for user-turn formatting
-    │   └── query_with_context.txt
-    ├── few_shot/        # YAML few-shot example banks
-    │   └── examples.yaml
-    └── prompt_manager.py
-"""
+"""Loads, caches, and renders prompt templates from the ``hermes/prompts/`` directory tree."""
 
 from __future__ import annotations
 
@@ -40,21 +22,9 @@ _PROMPTS_DIR = Path(__file__).resolve().parent
 
 
 class PromptManager:
-    """Central registry for system personas, user templates, and few-shot banks.
+    """Registry for system personas, user templates, and few-shot banks.
 
-    All templates are lazily loaded from disk on first access and cached in
-    memory.  Re-instantiating the manager or calling ``reload()`` clears
-    the cache.
-
-    Usage::
-
-        pm = PromptManager()
-        persona = pm.get_system_prompt("polite")
-        user_msg = pm.render_user_prompt(
-            "query_with_context",
-            query="What is my balance?",
-            context="Account #1234 has a balance of $42.00.",
-        )
+    Templates are lazily loaded from disk on first access and cached in memory.
     """
 
     def __init__(self, prompts_dir: Path | None = None) -> None:
@@ -90,10 +60,7 @@ class PromptManager:
     def render_user_prompt(self, template_name: str, **kwargs: Any) -> str:
         """Render a user-turn template with the given variables.
 
-        Templates use Python ``string.Template`` syntax (``$var`` or
-        ``${var}``).  Unknown placeholders are left as-is.
-
-        Raises ``FileNotFoundError`` if the template doesn't exist.
+        Uses Python ``string.Template`` syntax. Raises ``FileNotFoundError`` if not found.
         """
         if template_name not in self._user_cache:
             self._user_cache[template_name] = self._load_user_template(template_name)
@@ -126,7 +93,7 @@ class PromptManager:
     def format_few_shot_block(
         self, bank_name: str = "examples", label: str | None = None
     ) -> str:
-        """Return a pre-formatted few-shot examples block ready for injection."""
+        """Return a pre-formatted few-shot block ready for prompt injection."""
         examples = self.get_few_shot_examples(bank_name, label)
         if not examples:
             return ""

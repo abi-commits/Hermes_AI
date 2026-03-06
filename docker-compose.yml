@@ -18,6 +18,8 @@ services:
       - DATABASE_URL=postgresql://hermes:hermes@db:5432/hermes
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8002
+      - COSYVOICE2_HOST=cosyvoice2
+      - COSYVOICE2_PORT=50000
     env_file:
       - .env
     depends_on:
@@ -35,22 +37,36 @@ services:
       start_period: 40s
 
   # ===========================================================================
-  # TTS Worker
+  # CosyVoice2 TTS Server (GPU required)
   # ===========================================================================
-  tts-worker:
+  cosyvoice2:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: production
-    container_name: hermes-tts-worker
+      dockerfile: docker/cosyvoice2/Dockerfile
+    image: hermes-cosyvoice2:latest
+    container_name: hermes-cosyvoice2
     restart: unless-stopped
-    command: python -m hermes.workers.tts_worker
-    environment:
-      - APP_ENV=production
-    env_file:
-      - .env
+    ports:
+      - "50000:50000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - cosyvoice2_models:/root/.cache/modelscope
     networks:
       - hermes-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:50000/docs')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    profiles:
+      - gpu
 
   # ===========================================================================
   # PostgreSQL Database
@@ -139,6 +155,7 @@ volumes:
   chroma_data:
   prometheus_data:
   grafana_data:
+  cosyvoice2_models:
 
 # =============================================================================
 # Networks

@@ -9,7 +9,7 @@ from typing import Any
 
 
 class CallState(Enum):
-    """Call state machine states."""
+    """States in the call state machine."""
 
     IDLE = auto()
     CONNECTING = auto()
@@ -22,7 +22,7 @@ class CallState(Enum):
 
 @dataclass
 class ConversationTurn:
-    """A single turn in the conversation."""
+    """A single conversation turn."""
 
     role: str  # "user" or "assistant"
     content: str

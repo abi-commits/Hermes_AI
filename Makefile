@@ -71,9 +71,6 @@ run: ## Run the application
 run-dev: ## Run the application in development mode with reload
 	uv run uvicorn hermes.main:app --host 0.0.0.0 --port 8000 --reload
 
-run-worker: ## Run the TTS worker
-	uv run python -m hermes.workers.tts_worker
-
 seed-kb: ## Seed the knowledge base
 	uv run python scripts/seed_knowledge_base.py
 
@@ -84,11 +81,20 @@ seed-kb: ## Seed the knowledge base
 build: ## Build Docker image
 	$(DOCKER) build -t hermes:latest .
 
+build-cosyvoice2: ## Build the CosyVoice2 TTS server image (GPU required)
+	$(DOCKER) build -t hermes-cosyvoice2:latest -f docker/cosyvoice2/Dockerfile .
+
 up: ## Start services with docker-compose
 	$(COMPOSE) up -d
 
+up-gpu: ## Start all services including CosyVoice2 (GPU required)
+	$(COMPOSE) --profile gpu up -d
+
 down: ## Stop services with docker-compose
 	$(COMPOSE) down
+
+down-gpu: ## Stop all services including GPU profile
+	$(COMPOSE) --profile gpu down
 
 logs: ## View docker-compose logs
 	$(COMPOSE) logs -f

@@ -34,19 +34,23 @@ dependencies = [
     "unstructured>=0.16.0",
     "tiktoken>=0.7.0",
     "rank-bm25>=0.2.2",
+    "chatterbox-streaming>=0.1.2",
+    "perth>=1.0.0",
+    "deepgram-sdk>=3.11.0",
 ]
 
 [project.optional-dependencies]
-deepgram = ["deepgram-sdk>=3.7.0"]
+deepgram = ["deepgram-sdk>=3.7.0,<4.0.0"]
 gemini = ["google-genai>=1.0.0"]
 openai = ["openai>=1.54.0"]
-chatterbox = ["chatterbox-tts>=0.1.0", "perth>=0.1.0"]
+chatterbox = ["chatterbox-streaming>=0.1.0", "perth>=0.1.0"]
 all = [
     "deepgram-sdk>=3.7.0",
     "google-genai>=1.0.0",
     "openai>=1.54.0",
-    "chatterbox-tts>=0.1.0",
+    "chatterbox-streaming>=0.1.0",
     "perth>=0.1.0",
+    "aiohttp>=3.10.0",
 ]
 
 [dependency-groups]

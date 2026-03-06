@@ -1,16 +1,4 @@
-"""Script to populate the Chroma Cloud vector database from documents.
-
-Uses LangChain document loaders and text splitters for robust ingestion.
-
-Usage:
-    python scripts/seed_knowledge_base.py [options] <documents_dir>
-
-Examples:
-    python scripts/seed_knowledge_base.py ./docs
-    python scripts/seed_knowledge_base.py --chunk-size 500 --chunk-overlap 50 ./docs
-    python scripts/seed_knowledge_base.py --strategy markdown ./docs
-    python scripts/seed_knowledge_base.py --collection my_collection --clear ./docs
-"""
+"""Populate the Chroma vector database from a directory of documents."""
 
 import argparse
 import asyncio
@@ -143,14 +131,7 @@ _LOADER_REGISTRY: dict[str, tuple[str, str, dict[str, Any]]] = {
 
 
 def load_document(path: Path) -> list[Document]:
-    """Load a single file into LangChain Documents via the appropriate loader.
-
-    Args:
-        path: Path to the document file.
-
-    Returns:
-        List of LangChain Document objects (may be >1 for multi-page PDFs).
-    """
+    """Load a single file into LangChain Documents via the appropriate loader."""
     suffix = path.suffix.lower()
     entry = _LOADER_REGISTRY.get(suffix)
 
@@ -190,15 +171,7 @@ def load_directory(
     documents_dir: Path,
     file_types: list[str],
 ) -> list[Document]:
-    """Recursively load all matching files from a directory.
-
-    Args:
-        documents_dir: Root directory to scan.
-        file_types: List of allowed file extensions (e.g. [".txt", ".md"]).
-
-    Returns:
-        Flat list of LangChain Documents from all files.
-    """
+    """Recursively load all matching files from a directory."""
     all_docs: list[Document] = []
 
     for file_type in file_types:
@@ -235,18 +208,7 @@ def build_text_splitter(
     code_language: str = "python",
     token_encoding: str = "cl100k_base",
 ) -> RecursiveCharacterTextSplitter | MarkdownHeaderTextSplitter:
-    """Build a LangChain text splitter from CLI args.
-
-    Args:
-        strategy: One of "recursive", "markdown", "code", "token".
-        chunk_size: Maximum chunk length in characters (or tokens for "token").
-        chunk_overlap: Character/token overlap between consecutive chunks.
-        code_language: Language hint for the "code" strategy.
-        token_encoding: Tiktoken encoding name for the "token" strategy.
-
-    Returns:
-        A configured LangChain text splitter instance.
-    """
+    """Build a LangChain text splitter from CLI args."""
     if strategy == "markdown":
         return MarkdownHeaderTextSplitter(
             headers_to_split_on=_MARKDOWN_HEADERS,
@@ -283,18 +245,7 @@ def split_documents(
     docs: list[Document],
     splitter: RecursiveCharacterTextSplitter | MarkdownHeaderTextSplitter,
 ) -> list[Document]:
-    """Split documents into chunks, preserving metadata.
-
-    The MarkdownHeaderTextSplitter operates on raw text, so we handle it
-    slightly differently from the other RecursiveCharacterTextSplitter.
-
-    Args:
-        docs: List of loaded LangChain Documents.
-        splitter: A configured text splitter.
-
-    Returns:
-        List of chunked Documents with inherited + chunk-level metadata.
-    """
+    """Split documents into chunks, preserving metadata."""
     if isinstance(splitter, MarkdownHeaderTextSplitter):
         chunks: list[Document] = []
         for doc in docs:
@@ -316,19 +267,7 @@ def split_documents(
 
 
 def deterministic_id(source: str, chunk_index: int, content: str) -> str:
-    """Generate a reproducible document ID from source + index + content hash.
-
-    This ensures that re-running the script with the same content produces
-    the same IDs, making upserts idempotent.
-
-    Args:
-        source: Source file relative path.
-        chunk_index: Index of the chunk within the source.
-        content: The chunk text.
-
-    Returns:
-        A 32-character hex string ID.
-    """
+    """Generate a reproducible document ID from source + index + content hash."""
     payload = f"{source}::{chunk_index}::{content[:200]}"
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
@@ -339,19 +278,7 @@ def deterministic_id(source: str, chunk_index: int, content: str) -> str:
 
 
 async def seed_knowledge_base(args: argparse.Namespace) -> dict[str, Any]:
-    """Seed the knowledge base.
-
-    Pipeline:
-        1. Load documents via LangChain loaders
-        2. Split into chunks via LangChain text splitters
-        3. Upsert chunks into Chroma Cloud via ChromaRAGService
-
-    Args:
-        args: Parsed command line arguments.
-
-    Returns:
-        Statistics about the operation.
-    """
+    """Load, split, and upsert documents into Chroma."""
     documents_dir = Path(args.documents_dir)
     if not documents_dir.exists():
         logger.error("documents_directory_not_found", path=str(documents_dir))
@@ -493,11 +420,7 @@ async def seed_knowledge_base(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def main() -> int:
-    """Main entry point.
-
-    Returns:
-        Exit code.
-    """
+    """Main entry point."""
     args = parse_args()
 
     try:

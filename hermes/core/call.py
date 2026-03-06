@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import json
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -9,29 +10,40 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from hermes.api.metrics import MetricsCollector
-from hermes.core.audio import decode_mulaw, encode_mulaw
+from hermes.core.audio import decode_mulaw
 from hermes.models.call import CallState, ConversationTurn
+from hermes.services.tts.audio import convert_to_ulaw, resample_to_8khz
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
 
-    from hermes.services.llm import GeminiLLMService
-    from hermes.services.rag import ChromaRAGService
-    from hermes.services.stt import STTService
-    from hermes.services.tts import ChatterboxTTSService
+    from hermes.services.llm.base import AbstractLLMService
+    from hermes.services.rag.base import AbstractRAGService
+    from hermes.services.stt.base import AbstractSTTService
+    from hermes.services.tts.base import AbstractTTSService
 
 logger = structlog.get_logger(__name__)
 
 
-class Call:
-    """Manages the state and lifecycle of a single voice call.
+# ---------------------------------------------------------------------------
+# Module-level helper (avoids lambda in run_in_executor)
+# ---------------------------------------------------------------------------
 
-    This class coordinates:
-    - Audio processing queues
-    - STT, LLM, and TTS services
-    - Conversation history
-    - State transitions
-    """
+def _do_twilio_redirect(
+    account_sid: str,
+    auth_token: str,
+    call_sid: str,
+    twiml: str,
+) -> None:
+    """Update the Twilio call with new TwiML (blocking — run in executor)."""
+    from twilio.rest import Client  # type: ignore[import-untyped]
+
+    client = Client(account_sid, auth_token)
+    client.calls(call_sid).update(twiml=twiml)
+
+
+class Call:
+    """State machine and session manager for a single voice call."""
 
     def __init__(
         self,
@@ -39,15 +51,19 @@ class Call:
         stream_sid: str,
         websocket: "WebSocket",
         account_sid: str,
+        *,
+        # --- Injected services (optional — created lazily if None) ---
+        stt_service: "AbstractSTTService | None" = None,
+        llm_service: "AbstractLLMService | None" = None,
+        tts_service: "AbstractTTSService | None" = None,
+        rag_service: "AbstractRAGService | None" = None,
+        # --- Per-call configuration ---
+        persona: str = "default",
+        rag_metadata_filter: dict[str, Any] | None = None,
+        max_history: int = 20,
+        fallback_phrase: str = "I'm sorry, I had a problem. Could you repeat that?",
     ) -> None:
-        """Initialize a new call.
-
-        Args:
-            call_sid: Twilio call SID.
-            stream_sid: Twilio media stream SID.
-            websocket: WebSocket connection.
-            account_sid: Twilio account SID.
-        """
+        """Initialise a call."""
         self.call_sid = call_sid
         self.stream_sid = stream_sid
         self.websocket = websocket
@@ -68,17 +84,22 @@ class Call:
 
         # Conversation history
         self.conversation: list[ConversationTurn] = []
-        self.max_history = 20
+        self.max_history = max_history
 
-        # Services (initialized on start)
-        self.stt_service: STTService | None = None
-        self.llm_service: GeminiLLMService | None = None
-        self.tts_service: ChatterboxTTSService | None = None
-        self.rag_service: ChromaRAGService | None = None
+        # Services (injected or created lazily in start())
+        self.stt_service: "AbstractSTTService | None" = stt_service
+        self.llm_service: "AbstractLLMService | None" = llm_service
+        self.tts_service: "AbstractTTSService | None" = tts_service
+        self.rag_service: "AbstractRAGService | None" = rag_service
 
-        # Optional metadata filter applied to every RAG query
-        # (e.g. {"category": "faq"} to narrow retrieval scope)
-        self.rag_metadata_filter: dict[str, Any] | None = None
+        # Per-call configuration
+        self._persona = persona
+        self.rag_metadata_filter: dict[str, Any] | None = rag_metadata_filter
+        self._fallback_phrase = fallback_phrase
+
+        # Barge-in / interrupt signal
+        #   Set by interrupt() → checked by _tts_task between chunks
+        self._interrupt_event = asyncio.Event()
 
         # Background tasks
         self._tasks: set[asyncio.Task] = set()
@@ -100,7 +121,7 @@ class Call:
         return (end - self.started_at).total_seconds()
 
     async def start(self) -> None:
-        """Start the call and initialize services."""
+        """Start the call, initialise services lazily if not injected, and begin background tasks."""
         async with self._state_lock:
             if self._state != CallState.IDLE:
                 raise RuntimeError(f"Cannot start call from state {self._state}")
@@ -109,19 +130,39 @@ class Call:
             self.started_at = datetime.now(UTC)
             self._running = True
 
-            # Initialize services (lazy imports to avoid circular dependency)
-            from hermes.services.llm import GeminiLLMService
-            from hermes.services.rag import ChromaRAGService
-            from hermes.services.stt import STTService
-            from hermes.services.tts import ChatterboxTTSService
+            # ── Lazy service creation (skipped when orchestrator injected them) ──
+            if self.stt_service is None:
+                from hermes.services.stt import STTService
+                self.stt_service = STTService()
 
-            self.stt_service = STTService()
-            self.llm_service = GeminiLLMService()
-            self.tts_service = ChatterboxTTSService()
-            self.rag_service = ChromaRAGService()
+            if self.llm_service is None:
+                from config import get_settings
+                from hermes.models.llm import LLMConfig
+                from hermes.services.llm import GeminiLLMService
+                settings = get_settings()
+                self.llm_service = GeminiLLMService(
+                    api_key=settings.gemini_api_key,
+                    config=LLMConfig(
+                        model_name=settings.gemini_model,
+                        temperature=settings.gemini_temperature,
+                        max_output_tokens=settings.gemini_max_tokens,
+                    ),
+                )
+
+            if self.tts_service is None:
+                from hermes.services.tts import ChatterboxTTSService
+                self.tts_service = ChatterboxTTSService()
+
+            if self.rag_service is None:
+                from hermes.services.rag import ChromaRAGService
+                self.rag_service = ChromaRAGService()
+                try:
+                    await self.rag_service.warm_up()
+                except Exception as e:
+                    self._logger.warning("rag_warm_up_failed", error=str(e))
 
             MetricsCollector.record_call_started()
-            self._logger.info("call_started")
+            self._logger.info("call_started", persona=self._persona)
 
         # Start background processing tasks
         self._start_tasks()
@@ -141,11 +182,7 @@ class Call:
             task.add_done_callback(self._tasks.discard)
 
     async def _transition_to(self, new_state: CallState) -> None:
-        """Transition to a new state.
-
-        Args:
-            new_state: The new state to transition to.
-        """
+        """Transition to *new_state* and log the change."""
         async with self._state_lock:
             old_state = self._state
             self._state = new_state
@@ -156,11 +193,7 @@ class Call:
             )
 
     async def process_audio_chunk(self, payload: str) -> None:
-        """Process an incoming audio chunk from Twilio.
-
-        Args:
-            payload: Base64 encoded mu-law audio.
-        """
+        """Decode a base64 mu-law audio chunk from Twilio and enqueue it."""
         try:
             # Decode base64
             audio_bytes = base64.b64decode(payload)
@@ -175,59 +208,54 @@ class Call:
             self._logger.error("audio_processing_error", error=str(e))
 
     async def _stt_task(self) -> None:
-        """Background task: Process audio with STT."""
+        """Background task: stream audio to STT and forward transcripts to the LLM queue."""
         if not self.stt_service:
             return
 
         self._logger.info("stt_task_started")
 
-        try:
-            # Accumulate audio buffer for speech detection
-            audio_buffer: list[bytes] = []
-            silence_frames = 0
-            max_silence = 50  # ~1 second of silence
+        # Queue of decoded PCM tensors fed into the Deepgram live connection.
+        tensor_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 
+        async def _feed_audio() -> None:
+            """Decode µ-law frames and push PCM tensors to the tensor queue."""
             while self._running:
                 try:
-                    # Wait for audio with timeout
-                    audio = await asyncio.wait_for(
-                        self.audio_in_queue.get(),
-                        timeout=0.1,
+                    audio_bytes = await asyncio.wait_for(
+                        self.audio_in_queue.get(), timeout=0.5
                     )
-                    audio_buffer.append(audio)
-                    silence_frames = 0
-
+                    pcm_tensor = decode_mulaw(audio_bytes)
+                    MetricsCollector.record_audio_bytes("inbound", len(audio_bytes))
+                    await tensor_queue.put(pcm_tensor)
                 except asyncio.TimeoutError:
-                    # Check if we have accumulated speech
-                    if audio_buffer and silence_frames < max_silence:
-                        silence_frames += 1
-                        continue
+                    continue
+                except asyncio.CancelledError:
+                    raise
 
-                    if audio_buffer:
-                        # Process accumulated audio
-                        combined = b"".join(audio_buffer)
-                        audio_buffer = []
-                        silence_frames = 0
-
-                        # Decode mu-law to PCM
-                        pcm_audio = decode_mulaw(combined)
-
-                        # Send to STT service
-                        stt_start = time.perf_counter()
-                        transcript = await self.stt_service.transcribe(pcm_audio)
-                        MetricsCollector.record_stt_latency(time.perf_counter() - stt_start)
-
-                        if transcript.strip():
-                            await self.text_out_queue.put(transcript)
-                            self._logger.debug("stt_transcript", text=transcript)
+        feeder = asyncio.create_task(
+            _feed_audio(), name=f"stt-feeder-{self.call_sid}"
+        )
+        try:
+            stt_start = time.perf_counter()
+            async for transcript in self.stt_service.stream_transcribe(tensor_queue):
+                if transcript.strip():
+                    MetricsCollector.record_stt_latency(
+                        time.perf_counter() - stt_start
+                    )
+                    await self.text_out_queue.put(transcript)
+                    self._logger.debug("stt_transcript", text=transcript)
+                    stt_start = time.perf_counter()
 
         except asyncio.CancelledError:
             self._logger.info("stt_task_cancelled")
         except Exception as e:
             self._logger.error("stt_task_error", error=str(e))
+        finally:
+            feeder.cancel()
+            await asyncio.gather(feeder, return_exceptions=True)
 
     async def _llm_task(self) -> None:
-        """Background task: Generate responses with LLM."""
+        """Background task: consume transcripts, retrieve RAG context, and stream LLM sentences to TTS."""
         if not self.llm_service:
             return
 
@@ -246,31 +274,38 @@ class Call:
                     ConversationTurn(role="user", content=user_text)
                 )
 
-                # Build context from history and RAG
+                # Build context (RAG + history) with a time budget
                 context = await self._build_context()
 
-                # Generate response (stream sentences for early TTS)
+                # Stream sentences and forward each one to TTS immediately
                 llm_start = time.perf_counter()
-                response = ""
+                response_parts: list[str] = []
+
                 async for chunk in self.llm_service.stream_sentences(
                     prompt=user_text, context=context
                 ):
-                    response += str(chunk)
+                    sentence = str(chunk)
+                    response_parts.append(sentence)
+                    # Feed each sentence to TTS as soon as it's ready
+                    await self.audio_out_queue.put(sentence)
+
                 MetricsCollector.record_llm_latency(time.perf_counter() - llm_start)
 
-                # Add assistant response to history
+                # Store the full response in conversation history
+                full_response = " ".join(response_parts)
                 self.conversation.append(
-                    ConversationTurn(role="assistant", content=response)
+                    ConversationTurn(role="assistant", content=full_response)
                 )
 
                 # Trim history if needed
                 if len(self.conversation) > self.max_history:
                     self.conversation = self.conversation[-self.max_history :]
 
-                # Queue for TTS
-                await self.audio_out_queue.put(response)
-
-                self._logger.debug("llm_response_generated", response=response[:100])
+                self._logger.debug(
+                    "llm_response_generated",
+                    response=full_response[:100],
+                    sentences=len(response_parts),
+                )
 
                 # Transition back to listening
                 await self._transition_to(CallState.LISTENING)
@@ -281,18 +316,14 @@ class Call:
             self._logger.error("llm_task_error", error=str(e))
 
     async def _build_context(self) -> str:
-        """Build conversation context from history and RAG.
-
-        Returns:
-            Context string for LLM.
-        """
+        """Assemble LLM context from RAG results and conversation history."""
         context_parts: list[str] = []
 
-        # Add RAG context if available
+        # Add RAG context if available (time-budgeted)
         if self.rag_service and self.conversation:
             last_query = self.conversation[-1].content
             try:
-                rag_results = await self.rag_service.retrieve(
+                rag_results = await self.rag_service.retrieve_with_timeout(
                     last_query,
                     where=self.rag_metadata_filter,
                 )
@@ -312,7 +343,7 @@ class Call:
         return "\n".join(context_parts)
 
     async def _tts_task(self) -> None:
-        """Background task: Generate audio with TTS."""
+        """Background task: synthesise LLM sentences and stream µ-law audio to Twilio."""
         if not self.tts_service:
             return
 
@@ -320,26 +351,46 @@ class Call:
 
         try:
             while self._running:
-                # Wait for text to synthesize
+                # Wait for a sentence to synthesize
                 text = await self.audio_out_queue.get()
 
-                # Transition to speaking state
-                await self._transition_to(CallState.SPEAKING)
+                # Transition to speaking state (idempotent if already SPEAKING)
+                if self._state != CallState.SPEAKING:
+                    await self._transition_to(CallState.SPEAKING)
 
-                # Generate audio
                 tts_start = time.perf_counter()
-                audio = await self.tts_service.generate(text)
+                chunk_count = 0
+
+                # Clear any pending interrupt from a previous sentence before
+                # starting synthesis for this one.
+                self._interrupt_event.clear()
+
+                # Stream synthesis: each chunk is 16-bit PCM at model.sr (24 kHz)
+                async for chunk_bytes in self.tts_service.generate_stream(text):
+                    # Barge-in check: exit synthesis loop immediately
+                    if self._interrupt_event.is_set():
+                        self._logger.info("tts_stream_interrupted", text=text[:60])
+                        break
+                    # 1. Resample 24 kHz → 8 kHz (Twilio expects 8 kHz PCMU)
+                    resampled = resample_to_8khz(
+                        chunk_bytes, self.tts_service.sample_rate
+                    )
+                    # 2. Convert 16-bit PCM → 8-bit µ-law
+                    mulaw_audio = convert_to_ulaw(resampled)
+                    # 3. Send frame immediately
+                    await self._send_audio(mulaw_audio)
+                    MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
+                    chunk_count += 1
+
                 MetricsCollector.record_tts_latency(time.perf_counter() - tts_start)
+                self._logger.debug(
+                    "tts_audio_sent", text=text[:100], chunks=chunk_count
+                )
 
-                # Encode to mu-law and send to Twilio
-                mulaw_audio = encode_mulaw(audio)
-                await self._send_audio(mulaw_audio)
-                MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
-
-                self._logger.debug("tts_audio_sent", text=text[:100])
-
-                # Transition back to listening
-                await self._transition_to(CallState.LISTENING)
+                # Only transition back to listening when queue is empty
+                # (no more sentences pending from the LLM)
+                if self.audio_out_queue.empty():
+                    await self._transition_to(CallState.LISTENING)
 
         except asyncio.CancelledError:
             self._logger.info("tts_task_cancelled")
@@ -348,13 +399,7 @@ class Call:
             self._logger.error("tts_task_error", error=str(e))
 
     async def _send_audio(self, audio: bytes) -> None:
-        """Send audio back to Twilio.
-
-        Args:
-            audio: Mu-law encoded audio bytes.
-        """
-        import json
-
+        """Base64-encode *audio* and send it to Twilio as a media event."""
         payload = base64.b64encode(audio).decode()
         message = {
             "event": "media",
@@ -367,12 +412,34 @@ class Call:
         except Exception as e:
             self._logger.error("audio_send_error", error=str(e))
 
-    async def handle_dtmf(self, digit: str) -> None:
-        """Handle DTMF (touch tone) input.
+    async def _send_twilio_clear(self) -> None:
+        """Send a Twilio ``clear`` event to flush buffered audio mid-utterance."""
+        message = {"event": "clear", "streamSid": self.stream_sid}
+        try:
+            await self.websocket.send_text(json.dumps(message))
+            self._logger.debug("twilio_clear_sent")
+        except Exception as e:
+            self._logger.warning("twilio_clear_failed", error=str(e))
 
-        Args:
-            digit: The DTMF digit pressed.
-        """
+    async def interrupt(self) -> None:
+        """Stop current TTS, drain pending sentences, clear Twilio buffer, return to LISTENING."""
+        self._interrupt_event.set()
+
+        # Drain pending sentences (future TTS jobs)
+        drained = 0
+        while not self.audio_out_queue.empty():
+            try:
+                self.audio_out_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+
+        await self._send_twilio_clear()
+        await self._transition_to(CallState.LISTENING)
+        self._logger.info("barge_in_interrupt", drained_sentences=drained)
+
+    async def handle_dtmf(self, digit: str) -> None:
+        """Route a DTMF digit to the appropriate handler."""
         self._logger.info("dtmf_received", digit=digit)
 
         # Handle special digits
@@ -387,9 +454,90 @@ class Call:
             await self.stop()
 
     async def _handle_transfer(self) -> None:
-        """Transfer the call to a human agent."""
-        self._logger.info("transfer_requested")
-        # Implementation depends on your call center integration
+        """Transfer the call to a human agent via the Twilio REST API.
+
+        Announces the transfer via TTS, then updates the in-progress Twilio
+        call with ``<Dial>`` TwiML so the caller is connected directly to the
+        configured ``TWILIO_TRANSFER_NUMBER``.  The local AI pipeline is
+        stopped after the redirect is issued — Twilio takes over from there.
+        """
+        from config import get_settings
+
+        settings = get_settings()
+        transfer_number = settings.twilio_transfer_number
+
+        if not transfer_number:
+            self._logger.warning(
+                "transfer_skipped",
+                reason="TWILIO_TRANSFER_NUMBER not configured",
+            )
+            await self.audio_out_queue.put(
+                "I'm sorry, I'm unable to transfer your call right now. "
+                "Please call back and ask to speak with an agent."
+            )
+            return
+
+        if not settings.twilio_account_sid or not settings.twilio_auth_token:
+            self._logger.error(
+                "transfer_failed",
+                reason="Twilio credentials not configured",
+            )
+            return
+
+        self._logger.info(
+            "transfer_requested",
+            call_sid=self.call_sid,
+            transfer_to=transfer_number,
+        )
+
+        # 1. Announce the transfer before handing off
+        announcement = (
+            "Please hold while I transfer you to a human agent."
+        )
+        await self.audio_out_queue.put(announcement)
+
+        # Give TTS time to finish the announcement before redirecting
+        await asyncio.sleep(3.0)
+
+        # 2. Build TwiML that dials the transfer number
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            f"<Dial callerId=\"{settings.twilio_phone_number or ''}\">"
+            f"{transfer_number}"
+            "</Dial>"
+            "</Response>"
+        )
+
+        # 3. Redirect the Twilio call via REST API (runs in thread pool to avoid blocking)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                _do_twilio_redirect,
+                settings.twilio_account_sid,
+                settings.twilio_auth_token,
+                self.call_sid,
+                twiml,
+            )
+            self._logger.info(
+                "transfer_completed",
+                call_sid=self.call_sid,
+                transfer_to=transfer_number,
+            )
+        except Exception as exc:
+            self._logger.error(
+                "transfer_failed",
+                call_sid=self.call_sid,
+                error=str(exc),
+            )
+            await self.audio_out_queue.put(
+                "I'm sorry, the transfer failed. Please try again or call back."
+            )
+            return
+
+        # 4. Stop the local AI pipeline — Twilio now owns the call
+        await self.stop()
 
     async def _repeat_last_message(self) -> None:
         """Repeat the last assistant message."""
@@ -399,7 +547,7 @@ class Call:
                 break
 
     async def stop(self) -> None:
-        """Stop the call and cleanup resources."""
+        """Cancel background tasks and transition to ENDED state."""
         await self._transition_to(CallState.DISCONNECTING)
         self._running = False
 

@@ -9,17 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from hermes import __version__
-from hermes.api import health_router, metrics_router
+from hermes.api import calls_router, health_router, knowledge_router, metrics_router, twilio_router
 from hermes.api.metrics import APP_INFO, MetricsCollector
+from hermes.core.orchestrator import CallOrchestrator, ServiceBundle
+from hermes.models.llm import LLMConfig
+from hermes.services.llm import GeminiLLMService
 from hermes.services.rag import ChromaRAGService
+from hermes.services.stt import DeepgramSTTService
 from hermes.services.tts import ChatterboxTTSService
 from hermes.websocket.handler import websocket_router
+from hermes.websocket.manager import connection_manager
 
 logger = structlog.get_logger(__name__)
 
 
 def setup_logging() -> None:
-    """Configure structured logging for the application."""
+    """Configure structured logging with JSON output in production."""
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -43,14 +48,7 @@ def setup_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan events.
-
-    Args:
-        app: FastAPI application instance.
-
-    Yields:
-        None
-    """
+    """Initialise and shut down all application services."""
     settings = get_settings()
     logger.info(
         "startup",
@@ -62,11 +60,15 @@ async def lifespan(app: FastAPI):
 
     # Startup: Initialize services
     try:
-        # Initialize ChromaRAG service
+        # 1. RAG — warm up eagerly so the first call pays no cold-start cost
         app.state.rag_service = ChromaRAGService()
-        logger.info("rag_service_initialized")
+        try:
+            await app.state.rag_service.warm_up()
+            logger.info("rag_service_initialized")
+        except Exception as rag_exc:
+            logger.warning("rag_warm_up_failed", error=str(rag_exc))
 
-        # Initialize TTS service with thread pool
+        # 2. TTS — Chatterbox with dedicated thread pool
         tts_executor = ThreadPoolExecutor(
             max_workers=settings.chatterbox_num_workers,
             thread_name_prefix="tts-worker",
@@ -84,6 +86,30 @@ async def lifespan(app: FastAPI):
         app.state.tts_service.set_executor(tts_executor)
         logger.info("tts_service_initialized", device=settings.chatterbox_device)
 
+        # 3. LLM — shared Gemini instance (stateless per-request)
+        app.state.llm_service = GeminiLLMService(
+            api_key=settings.gemini_api_key,
+            config=LLMConfig(
+                model_name=settings.gemini_model,
+                temperature=settings.gemini_temperature,
+                max_output_tokens=settings.gemini_max_tokens,
+            ),
+        )
+        logger.info("llm_service_initialized", model=settings.gemini_model)
+
+        # 4. Build the service bundle and orchestrator
+        #    STT is a factory (DeepgramSTTService) because each call needs its
+        #    own Deepgram live WebSocket connection.
+        bundle = ServiceBundle(
+            stt_factory=DeepgramSTTService,
+            llm_service=app.state.llm_service,
+            tts_service=app.state.tts_service,
+            rag_service=app.state.rag_service,
+        )
+        app.state.orchestrator = CallOrchestrator(bundle)
+        connection_manager.set_orchestrator(app.state.orchestrator)
+        logger.info("orchestrator_initialized")
+
         # Update Prometheus app info
         APP_INFO.info({"version": __version__, "name": settings.app_name})
 
@@ -94,8 +120,12 @@ async def lifespan(app: FastAPI):
         raise
 
     finally:
-        # Shutdown: Cleanup resources
+        # Shutdown: gracefully terminate active calls, then release resources
         logger.info("shutdown")
+
+        if hasattr(app.state, "orchestrator"):
+            await app.state.orchestrator.shutdown()
+            logger.info("orchestrator_shutdown")
 
         if hasattr(app.state, "tts_executor"):
             app.state.tts_executor.shutdown(wait=False)
@@ -103,11 +133,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application.
-
-    Returns:
-        FastAPI: Configured FastAPI application.
-    """
+    """Create and configure the FastAPI application."""
     settings = get_settings()
     setup_logging()
 
@@ -132,6 +158,9 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(health_router, tags=["health"])
     app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
+    app.include_router(twilio_router, tags=["twilio"])
+    app.include_router(calls_router, tags=["calls"])
+    app.include_router(knowledge_router, tags=["knowledge"])
     app.include_router(websocket_router, prefix="/stream", tags=["websocket"])
 
     return app

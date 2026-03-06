@@ -1,7 +1,4 @@
-"""Prometheus metrics endpoint.
-
-Exposes application metrics for monitoring and alerting.
-"""
+"""Prometheus metrics endpoint."""
 
 from typing import Any
 
@@ -102,124 +99,92 @@ AUDIO_BYTES = Counter(
     ["direction"],  # inbound, outbound
 )
 
+# Barge-in interrupts
+CALL_INTERRUPTS = Counter(
+    "hermes_call_interrupts_total",
+    "Total barge-in interrupts applied to active calls",
+)
+
 
 # Set application info on startup (updated in lifespan with real version)
 APP_INFO.info({"version": "0.0.0", "name": "hermes"})
 
 
 class MetricsCollector:
-    """Helper class for collecting and exposing metrics."""
+    """Static helpers for recording Prometheus metrics."""
 
     @staticmethod
     def record_call_started() -> None:
-        """Record a call started."""
+        """Increment the active-calls gauge."""
         ACTIVE_CALLS.inc()
 
     @staticmethod
     def record_call_ended(status: str, duration: float) -> None:
-        """Record a call ended.
-
-        Args:
-            status: Call status (completed, failed, etc.).
-            duration: Call duration in seconds.
-        """
+        """Decrement active-calls gauge and record duration/status."""
         ACTIVE_CALLS.dec()
         CALL_DURATION.observe(duration)
         CALLS_TOTAL.labels(status=status).inc()
 
     @staticmethod
     def record_stt_latency(seconds: float) -> None:
-        """Record STT latency.
-
-        Args:
-            seconds: Latency in seconds.
-        """
+        """Record STT latency."""
         STT_LATENCY.observe(seconds)
 
     @staticmethod
     def record_llm_latency(seconds: float) -> None:
-        """Record LLM latency.
-
-        Args:
-            seconds: Latency in seconds.
-        """
+        """Record LLM latency."""
         LLM_LATENCY.observe(seconds)
 
     @staticmethod
     def record_tts_latency(seconds: float) -> None:
-        """Record TTS latency.
-
-        Args:
-            seconds: Latency in seconds.
-        """
+        """Record TTS latency."""
         TTS_LATENCY.observe(seconds)
 
     @staticmethod
     def record_llm_tokens(prompt_tokens: int, completion_tokens: int) -> None:
-        """Record LLM token usage.
-
-        Args:
-            prompt_tokens: Number of prompt tokens.
-            completion_tokens: Number of completion tokens.
-        """
+        """Record LLM prompt and completion token counts."""
         LLM_TOKENS.labels(type="prompt").inc(prompt_tokens)
         LLM_TOKENS.labels(type="completion").inc(completion_tokens)
 
     @staticmethod
     def record_stt_error(error_type: str) -> None:
-        """Record an STT error.
-
-        Args:
-            error_type: Type of error.
-        """
+        """Increment the STT error counter."""
         STT_ERRORS.labels(error_type=error_type).inc()
 
     @staticmethod
     def record_tts_error(error_type: str) -> None:
-        """Record a TTS error.
-
-        Args:
-            error_type: Type of error.
-        """
+        """Increment the TTS error counter."""
         TTS_ERRORS.labels(error_type=error_type).inc()
 
     @staticmethod
     def record_llm_error(error_type: str) -> None:
-        """Record an LLM error.
-
-        Args:
-            error_type: Type of error.
-        """
+        """Increment the LLM error counter."""
         LLM_ERRORS.labels(error_type=error_type).inc()
 
     @staticmethod
     def record_websocket_connected() -> None:
-        """Record a WebSocket connection."""
+        """Increment the active WebSocket connections gauge."""
         WS_CONNECTIONS.inc()
 
     @staticmethod
     def record_websocket_disconnected() -> None:
-        """Record a WebSocket disconnection."""
+        """Decrement the active WebSocket connections gauge."""
         WS_CONNECTIONS.dec()
 
     @staticmethod
     def record_audio_bytes(direction: str, bytes_count: int) -> None:
-        """Record audio bytes processed.
-
-        Args:
-            direction: "inbound" or "outbound".
-            bytes_count: Number of bytes.
-        """
+        """Record audio bytes processed (direction: ``inbound`` or ``outbound``)."""
         AUDIO_BYTES.labels(direction=direction).inc(bytes_count)
+
+    @staticmethod
+    def record_call_interrupted(call_sid: str) -> None:  # noqa: ARG004
+        """Increment the barge-in interrupt counter."""
+        CALL_INTERRUPTS.inc()
 
 
 @router.get("")
 async def metrics() -> Response:
-    """Prometheus metrics endpoint.
-
-    Returns:
-        Prometheus-formatted metrics.
-    """
+    """Return Prometheus-formatted metrics."""
     return Response(
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST,
@@ -228,11 +193,7 @@ async def metrics() -> Response:
 
 @router.get("/json")
 async def metrics_json() -> dict:
-    """Metrics in JSON format for debugging.
-
-    Returns:
-        Metrics as JSON.
-    """
+    """Return active call and WebSocket counts as JSON (for debugging)."""
     return {
         "active_calls": ACTIVE_CALLS._value.get(),  # type: ignore
         "websocket_connections": WS_CONNECTIONS._value.get(),  # type: ignore

@@ -1,12 +1,4 @@
-"""Benchmark TTS latency.
-
-Usage:
-    python scripts/benchmark_tts.py [options]
-
-Examples:
-    python scripts/benchmark_tts.py
-    python scripts/benchmark_tts.py --samples 100 --text-lengths 50 100 200
-"""
+"""Benchmark TTS latency."""
 
 import argparse
 import asyncio
@@ -64,14 +56,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def generate_test_text(length: int) -> str:
-    """Generate test text of specified length.
-
-    Args:
-        length: Desired text length.
-
-    Returns:
-        Test text.
-    """
+    """Generate test text of specified length."""
     sentences = [
         "Hello, this is a test sentence for TTS benchmarking.",
         "The quick brown fox jumps over the lazy dog.",
@@ -97,15 +82,7 @@ def generate_test_text(length: int) -> str:
 
 
 async def benchmark_single(text: str, tts_service: ChatterboxTTSService) -> dict[str, Any]:
-    """Benchmark a single TTS synthesis.
-
-    Args:
-        text: Text to synthesize.
-        tts_service: TTS service instance.
-
-    Returns:
-        Benchmark results.
-    """
+    """Benchmark a single TTS synthesis."""
     start_time = time.perf_counter()
 
     try:
@@ -140,17 +117,7 @@ async def benchmark_text_length(
     warmup: int,
     tts_service: ChatterboxTTSService,
 ) -> dict[str, Any]:
-    """Benchmark TTS for a specific text length.
-
-    Args:
-        length: Text length in characters.
-        samples: Number of samples.
-        warmup: Number of warmup samples.
-        tts_service: TTS service instance.
-
-    Returns:
-        Benchmark results.
-    """
+    """Benchmark TTS for a specific text length."""
     text = generate_test_text(length)
     logger.info("benchmarking_text_length", length=length, text=text[:50])
 
@@ -215,14 +182,7 @@ async def benchmark_text_length(
 
 
 async def run_benchmark(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Run the benchmark.
-
-    Args:
-        args: Parsed command line arguments.
-
-    Returns:
-        Benchmark results.
-    """
+    """Run the benchmark."""
     # Initialize TTS service
     if args.provider == "mock":
         from hermes.services.tts import MockTTSService
@@ -263,11 +223,7 @@ async def run_benchmark(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 async def main() -> int:
-    """Main entry point.
-
-    Returns:
-        Exit code.
-    """
+    """Main entry point."""
     args = parse_args()
 
     try:
