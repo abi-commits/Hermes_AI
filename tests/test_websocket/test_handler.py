@@ -35,7 +35,7 @@ async def test_websocket_accepts_connection(mock_websocket):
 @pytest.mark.asyncio
 async def test_websocket_handles_start_message(mock_websocket, sample_start_message):
     """Test that start message initializes call."""
-    call_sid = "CA1234567890"
+    call_sid = sample_start_message["start"]["callSid"]
 
     stop_message = {
         "event": "stop",
@@ -60,7 +60,7 @@ async def test_websocket_handles_media_message(
     mock_websocket, sample_start_message, sample_media_message
 ):
     """Test that media messages are processed."""
-    call_sid = "CA1234567890"
+    call_sid = sample_start_message["start"]["callSid"]
 
     stop_message = {
         "event": "stop",

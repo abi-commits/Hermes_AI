@@ -66,22 +66,29 @@ def mock_tts_service() -> MockTTSService:
 
 @pytest.fixture
 def mock_websocket() -> MagicMock:
-    """Create a mock WebSocket."""
+    """Create a mock WebSocket with app state."""
     websocket = MagicMock()
     websocket.accept = AsyncMock()
     websocket.receive_text = AsyncMock()
     websocket.send_text = AsyncMock()
     websocket.close = AsyncMock()
+
+    # Mock app.state so _get_manager works
+    app_state = MagicMock()
+    app_state.connection_manager = None  # Will fall back to new ConnectionManager()
+    del app_state.connection_manager  # hasattr returns False
+    websocket.app = MagicMock()
+    websocket.app.state = app_state
+
     return websocket
 
 
 @pytest.fixture(autouse=True)
 def disable_external_calls() -> Generator[None, None, None]:
     """Disable external API calls during tests."""
-    with patch("httpx.AsyncClient") as mock:
-        mock.return_value.__aenter__ = AsyncMock()
-        mock.return_value.__aexit__ = AsyncMock()
-        yield
+    # Don't patch httpx.AsyncClient globally — services now accept
+    # an http_client via DI.  Just yield so the fixture is a no-op.
+    yield
 
 
 @pytest.fixture

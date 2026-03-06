@@ -27,6 +27,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
         self._orchestrator: "CallOrchestrator | None" = None
         self._logger = structlog.get_logger(__name__)
+        self._services = services
 
     # ------------------------------------------------------------------
     # Orchestrator integration
@@ -199,5 +200,13 @@ class ConnectionManager:
         self._logger.debug("active_calls_metrics", **metrics)
 
 
-# Global connection manager instance
-connection_manager = ConnectionManager()
+def get_connection_manager(services: "ServiceContainer | None" = None) -> ConnectionManager:
+    """Create a ConnectionManager with the given service container.
+
+    Args:
+        services: Service container for dependency injection.
+
+    Returns:
+        A new ConnectionManager instance.
+    """
+    return ConnectionManager(services=services)

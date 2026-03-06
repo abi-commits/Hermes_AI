@@ -8,24 +8,20 @@ Hermes is a real-time voice AI service that processes phone calls through a pipe
 
 ## System Architecture
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────────────────────────────┐
-│   Caller    │────▶│   Twilio    │────▶│              Hermes                 │
-│  (Phone)    │◀────│   (Voice)   │◀────│  ┌─────────┐ ┌─────┐ ┌─────────┐   │
-└─────────────┘     └─────────────┘     │  │   STT   │ │ LLM │ │   TTS   │   │
-                                        │  │(Deepgrm)│ │(Gem)│ │(ChatBox)│   │
-                                        │  └────┬────┘ └──┬──┘ └────┬────┘   │
-                                        │       │         │         │        │
-                                        │  ┌────┴─────────┴─────────┴────┐   │
-                                        │  │      Call State Machine      │   │
-                                        │  └──────────────────────────────┘   │
-                                        └─────────────────────────────────────┘
-                                                       │
-                                                       ▼
-                                              ┌──────────────┐
-                                              │  Vector DB   │
-                                              │  (ChromaDB)  │
-                                              └──────────────┘
+```mermaid
+flowchart TD
+    Caller["📞 Caller"] -->|Phone call| Twilio["Twilio"]
+    Twilio -->|WebSocket Media Streams| WSS["WebSocket Server<br/>(FastAPI)"]
+    
+    subgraph Hermes Backend
+        WSS -->|Incoming audio| STT["Streaming STT<br/>(Deepgram)"]
+        STT -->|Transcript| LLM["LLM + RAG<br/>(Gemini + Vector DB)"]
+        LLM -->|Response text| TTS["TTS Engine<br/>(Chatterbox Turbo)"]
+        TTS -->|Audio chunks| WSS
+    end
+    
+    WSS -->|Outgoing audio| Twilio
+    Twilio -->|Playback| Caller
 ```
 
 ## Component Overview

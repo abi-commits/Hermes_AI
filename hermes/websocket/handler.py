@@ -6,7 +6,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-from hermes.websocket.manager import connection_manager
+from hermes.websocket.manager import ConnectionManager
 from hermes.websocket.schemas import (
     ConnectedMessage,
     MediaMessage,
@@ -18,12 +18,23 @@ logger = structlog.get_logger(__name__)
 websocket_router = APIRouter()
 
 
+def _get_manager(websocket: WebSocket) -> ConnectionManager:
+    """Get the ConnectionManager from app state.
+
+    Falls back to creating a new one if not configured (e.g. in tests).
+    """
+    if hasattr(websocket.app.state, "connection_manager"):
+        return websocket.app.state.connection_manager
+    return ConnectionManager()
+
+
 @websocket_router.websocket("/{call_sid}")
 async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
     """Handle a Twilio media stream WebSocket connection."""
     await websocket.accept()
     logger.info("websocket_accepted", call_sid=call_sid)
 
+    manager = _get_manager(websocket)
     call = None
 
     try:
@@ -58,7 +69,7 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                     return
 
                 # Create call instance
-                call = await connection_manager.connect(websocket, start_msg)
+                call = await manager.connect(websocket, start_msg)
 
             elif event_type == "media":
                 # Media event - process audio
@@ -67,7 +78,7 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                     continue
 
                 media_msg = MediaMessage(**message)
-                await connection_manager.handle_media(media_msg)
+                await manager.handle_media(media_msg)
 
             elif event_type == "dtmf":
                 # DTMF event - handle touch tones
@@ -81,7 +92,7 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                 # Stop event - end the call
                 stop_msg = StopMessage(**message)
                 logger.info("call_stopping", stream_sid=stop_msg.stream_sid)
-                await connection_manager.disconnect(stop_msg.stream_sid)
+                await manager.disconnect(stop_msg.stream_sid)
                 break
 
             elif event_type == "mark":
@@ -104,7 +115,7 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
     finally:
         # Ensure cleanup
         if call:
-            await connection_manager.disconnect(call.stream_sid)
+            await manager.disconnect(call.stream_sid)
 
 
 @websocket_router.get("/test-client")

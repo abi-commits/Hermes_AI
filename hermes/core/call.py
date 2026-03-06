@@ -164,6 +164,10 @@ class Call:
             MetricsCollector.record_call_started()
             self._logger.info("call_started", persona=self._persona)
 
+        # Record metrics
+        MetricsCollector.record_call_started()
+        MetricsCollector.record_websocket_connected()
+
         # Start background processing tasks
         self._start_tasks()
 
@@ -249,6 +253,7 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("stt_task_cancelled")
         except Exception as e:
+            MetricsCollector.record_stt_error(type(e).__name__)
             self._logger.error("stt_task_error", error=str(e))
         finally:
             feeder.cancel()
@@ -264,7 +269,7 @@ class Call:
         try:
             while self._running:
                 # Wait for user input
-                user_text = await self.text_out_queue.get()
+                user_text = await self.text_queue.get()
 
                 # Transition to processing state
                 await self._transition_to(CallState.PROCESSING)
@@ -313,6 +318,7 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("llm_task_cancelled")
         except Exception as e:
+            MetricsCollector.record_llm_error(type(e).__name__)
             self._logger.error("llm_task_error", error=str(e))
 
     async def _build_context(self) -> str:

@@ -53,6 +53,31 @@ async def readiness_check(request: Request) -> ReadinessResponse:
     # Check TTS service
     checks["tts"] = getattr(request.app.state, "tts_service", None) is not None
 
+    # Check Redis
+    try:
+        if hasattr(request.app.state, "redis"):
+            await request.app.state.redis.ping()
+            checks["redis"] = True
+    except Exception:
+        pass
+
+    # Check Vector DB
+    try:
+        if hasattr(request.app.state, "vector_db"):
+            stats = await request.app.state.vector_db.get_collection_stats()
+            checks["vector_db"] = stats.get("status") != "disconnected"
+    except Exception:
+        pass
+
+    # Check Database (basic import check for now)
+    try:
+        from hermes.models.base import get_engine
+
+        engine = get_engine()
+        checks["database"] = engine is not None
+    except Exception:
+        pass
+
     all_ready = all(checks.values())
 
     return ReadinessResponse(
