@@ -1,14 +1,28 @@
-"""Data models for database entities."""
+"""Hermes data models.
 
-from hermes.models.base import Base, get_db_session, get_engine, get_session_factory
-from hermes.models.call_record import CallRecord
-from hermes.models.conversation import Conversation
+Centralised package for all dataclasses, enums, and value objects used
+across the application.  Keeping models separate from service logic
+improves testability, prevents circular imports, and makes the domain
+language explicit.
+"""
+
+from hermes.models.call import CallState, ConversationTurn
+from hermes.models.llm import (
+    InterruptMarker,
+    LLMConfig,
+    LLMGenerationError,
+)
+from hermes.models.prompts import FewShotExample, SystemPrompt
 
 __all__ = [
-    "Base",
-    "CallRecord",
-    "Conversation",
-    "get_db_session",
-    "get_engine",
-    "get_session_factory",
+    # call
+    "CallState",
+    "ConversationTurn",
+    # llm
+    "InterruptMarker",
+    "LLMConfig",
+    "LLMGenerationError",
+    # prompts
+    "FewShotExample",
+    "SystemPrompt",
 ]

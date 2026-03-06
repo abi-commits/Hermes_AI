@@ -16,15 +16,14 @@ services:
     environment:
       - APP_ENV=production
       - DATABASE_URL=postgresql://hermes:hermes@db:5432/hermes
-      - REDIS_URL=redis://redis:6379/0
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8002
+      - COSYVOICE2_HOST=cosyvoice2
+      - COSYVOICE2_PORT=50000
     env_file:
       - .env
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       chromadb:
         condition: service_started
@@ -38,26 +37,36 @@ services:
       start_period: 40s
 
   # ===========================================================================
-  # TTS Worker
+  # CosyVoice2 TTS Server (GPU required)
   # ===========================================================================
-  tts-worker:
+  cosyvoice2:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: production
-    container_name: hermes-tts-worker
+      dockerfile: docker/cosyvoice2/Dockerfile
+    image: hermes-cosyvoice2:latest
+    container_name: hermes-cosyvoice2
     restart: unless-stopped
-    command: python -m hermes.workers.tts_worker
-    environment:
-      - APP_ENV=production
-      - REDIS_URL=redis://redis:6379/0
-    env_file:
-      - .env
-    depends_on:
-      redis:
-        condition: service_healthy
+    ports:
+      - "50000:50000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - cosyvoice2_models:/root/.cache/modelscope
     networks:
       - hermes-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:50000/docs')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    profiles:
+      - gpu
 
   # ===========================================================================
   # PostgreSQL Database
@@ -80,26 +89,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U hermes -d hermes"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  # ===========================================================================
-  # Redis Cache & Queue
-  # ===========================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: hermes-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
-    networks:
-      - hermes-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
       retries: 5
 
   # ===========================================================================
@@ -163,10 +152,10 @@ services:
 # =============================================================================
 volumes:
   postgres_data:
-  redis_data:
   chroma_data:
   prometheus_data:
   grafana_data:
+  cosyvoice2_models:
 
 # =============================================================================
 # Networks

@@ -1,12 +1,10 @@
-"""Health check endpoints.
-
-Provides liveness and readiness probes for Kubernetes and monitoring.
-"""
+"""Health check endpoints (liveness and readiness probes)."""
 
 from fastapi import APIRouter, Request, status
 from pydantic import BaseModel
 
 from config import get_settings
+from hermes import __version__
 
 router = APIRouter(tags=["health"])
 
@@ -28,31 +26,32 @@ class ReadinessResponse(BaseModel):
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Liveness probe - basic health check.
-
-    Returns:
-        Health status of the application.
-    """
+    """Liveness probe."""
     settings = get_settings()
     return HealthResponse(
         status="healthy",
-        version="0.1.0",
+        version=__version__,
         environment=settings.app_env,
     )
 
 
 @router.get("/ready", response_model=ReadinessResponse)
 async def readiness_check(request: Request) -> ReadinessResponse:
-    """Readiness probe - check if app is ready to serve requests.
+    """Readiness probe — checks if RAG and TTS services are initialised."""
+    checks: dict[str, bool] = {}
 
-    Returns:
-        Readiness status with dependency checks.
-    """
-    checks: dict[str, bool] = {
-        "database": False,
-        "redis": False,
-        "vector_db": False,
-    }
+    # Check RAG / ChromaDB connection
+    try:
+        rag = getattr(request.app.state, "rag_service", None)
+        if rag is not None:
+            checks["rag"] = True
+        else:
+            checks["rag"] = False
+    except Exception:
+        checks["rag"] = False
+
+    # Check TTS service
+    checks["tts"] = getattr(request.app.state, "tts_service", None) is not None
 
     # Check Redis
     try:
@@ -89,14 +88,10 @@ async def readiness_check(request: Request) -> ReadinessResponse:
 
 @router.get("/live", response_model=HealthResponse, status_code=status.HTTP_200_OK)
 async def liveness_check() -> HealthResponse:
-    """Liveness probe - check if app is running.
-
-    Returns:
-        Liveness status.
-    """
+    """Liveness probe."""
     settings = get_settings()
     return HealthResponse(
         status="alive",
-        version="0.1.0",
+        version=__version__,
         environment=settings.app_env,
     )

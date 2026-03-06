@@ -12,7 +12,6 @@ from hermes.websocket.schemas import (
     MediaMessage,
     StartMessage,
     StopMessage,
-    TwilioMessage,
 )
 
 logger = structlog.get_logger(__name__)
@@ -31,15 +30,7 @@ def _get_manager(websocket: WebSocket) -> ConnectionManager:
 
 @websocket_router.websocket("/{call_sid}")
 async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
-    """Handle WebSocket connection from Twilio.
-
-    This is the main entry point for Twilio media streams.
-    It manages the lifecycle of a voice call.
-
-    Args:
-        websocket: The WebSocket connection.
-        call_sid: The Twilio call SID from the URL.
-    """
+    """Handle a Twilio media stream WebSocket connection."""
     await websocket.accept()
     logger.info("websocket_accepted", call_sid=call_sid)
 

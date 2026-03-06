@@ -1,12 +1,4 @@
-"""Benchmark TTS latency.
-
-Usage:
-    python scripts/benchmark_tts.py [options]
-
-Examples:
-    python scripts/benchmark_tts.py
-    python scripts/benchmark_tts.py --samples 100 --text-lengths 50 100 200
-"""
+"""Benchmark TTS latency."""
 
 import argparse
 import asyncio
@@ -21,7 +13,7 @@ import structlog
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hermes.services.tts import TTSService
+from hermes.services.tts import ChatterboxTTSService
 
 logger = structlog.get_logger(__name__)
 
@@ -64,14 +56,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def generate_test_text(length: int) -> str:
-    """Generate test text of specified length.
-
-    Args:
-        length: Desired text length.
-
-    Returns:
-        Test text.
-    """
+    """Generate test text of specified length."""
     sentences = [
         "Hello, this is a test sentence for TTS benchmarking.",
         "The quick brown fox jumps over the lazy dog.",
@@ -96,30 +81,24 @@ def generate_test_text(length: int) -> str:
     return text[:length].strip()
 
 
-async def benchmark_single(text: str, tts_service: TTSService) -> dict[str, Any]:
-    """Benchmark a single TTS synthesis.
-
-    Args:
-        text: Text to synthesize.
-        tts_service: TTS service instance.
-
-    Returns:
-        Benchmark results.
-    """
+async def benchmark_single(text: str, tts_service: ChatterboxTTSService) -> dict[str, Any]:
+    """Benchmark a single TTS synthesis."""
     start_time = time.perf_counter()
 
     try:
-        audio = await tts_service.synthesize(text)
+        audio_bytes = await tts_service.generate(text)
         end_time = time.perf_counter()
 
         latency = end_time - start_time
-        audio_duration = len(audio) / 16000  # Assuming 16kHz output
+        # audio_bytes are int16: 2 bytes per sample
+        num_samples = len(audio_bytes) // 2
+        audio_duration = num_samples / tts_service.sample_rate
 
         return {
             "success": True,
             "latency": latency,
             "text_length": len(text),
-            "audio_samples": len(audio),
+            "audio_samples": num_samples,
             "audio_duration": audio_duration,
             "rtf": latency / audio_duration if audio_duration > 0 else 0,
         }
@@ -136,19 +115,9 @@ async def benchmark_text_length(
     length: int,
     samples: int,
     warmup: int,
-    tts_service: TTSService,
+    tts_service: ChatterboxTTSService,
 ) -> dict[str, Any]:
-    """Benchmark TTS for a specific text length.
-
-    Args:
-        length: Text length in characters.
-        samples: Number of samples.
-        warmup: Number of warmup samples.
-        tts_service: TTS service instance.
-
-    Returns:
-        Benchmark results.
-    """
+    """Benchmark TTS for a specific text length."""
     text = generate_test_text(length)
     logger.info("benchmarking_text_length", length=length, text=text[:50])
 
@@ -213,21 +182,14 @@ async def benchmark_text_length(
 
 
 async def run_benchmark(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Run the benchmark.
-
-    Args:
-        args: Parsed command line arguments.
-
-    Returns:
-        Benchmark results.
-    """
+    """Run the benchmark."""
     # Initialize TTS service
     if args.provider == "mock":
         from hermes.services.tts import MockTTSService
 
         tts_service = MockTTSService(duration_seconds=0.1)
     else:
-        tts_service = TTSService()
+        tts_service = ChatterboxTTSService()
 
     logger.info(
         "starting_benchmark",
@@ -261,11 +223,7 @@ async def run_benchmark(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 async def main() -> int:
-    """Main entry point.
-
-    Returns:
-        Exit code.
-    """
+    """Main entry point."""
     args = parse_args()
 
     try:

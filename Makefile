@@ -1,7 +1,6 @@
 .PHONY: help install update clean test test-cov lint format type-check check run run-dev build up down logs shell
 
 PYTHON := python3
-POETRY := poetry
 DOCKER := docker
 COMPOSE := docker-compose
 
@@ -14,13 +13,13 @@ help: ## Show this help message
 # =============================================================================
 
 install: ## Install dependencies
-	$(POETRY) install --extras all
+	uv sync --extra all
 
 update: ## Update dependencies
-	$(POETRY) update
+	uv lock --upgrade
 
-lock: ## Update poetry.lock
-	$(POETRY) lock
+lock: ## Update uv.lock
+	uv lock
 
 clean: ## Clean cache and temporary files
 	find . -type d -name __pycache__ -exec rm -rf {} +
@@ -34,31 +33,31 @@ clean: ## Clean cache and temporary files
 # =============================================================================
 
 test: ## Run unit tests
-	$(POETRY) run pytest -m "not integration and not slow"
+	uv run pytest -m "not integration and not slow"
 
 test-all: ## Run all tests including integration
-	$(POETRY) run pytest
+	uv run pytest
 
 test-cov: ## Run tests with coverage report
-	$(POETRY) run pytest --cov=hermes --cov=config --cov-report=term-missing --cov-report=html
+	uv run pytest --cov=hermes --cov=config --cov-report=term-missing --cov-report=html
 
 # =============================================================================
 # Code Quality
 # =============================================================================
 
 lint: ## Run linters (flake8)
-	$(POETRY) run flake8 hermes config tests
+	uv run flake8 hermes config tests
 
 format: ## Format code with black and isort
-	$(POETRY) run black hermes config tests
-	$(POETRY) run isort hermes config tests
+	uv run black hermes config tests
+	uv run isort hermes config tests
 
 format-check: ## Check code formatting without making changes
-	$(POETRY) run black --check hermes config tests
-	$(POETRY) run isort --check-only hermes config tests
+	uv run black --check hermes config tests
+	uv run isort --check-only hermes config tests
 
 type-check: ## Run type checking with mypy
-	$(POETRY) run mypy hermes config
+	uv run mypy hermes config
 
 check: format-check lint type-check test ## Run all checks (format, lint, type-check, test)
 
@@ -67,16 +66,13 @@ check: format-check lint type-check test ## Run all checks (format, lint, type-c
 # =============================================================================
 
 run: ## Run the application
-	$(POETRY) run uvicorn hermes.main:app --host 0.0.0.0 --port 8000
+	uv run uvicorn hermes.main:app --host 0.0.0.0 --port 8000
 
 run-dev: ## Run the application in development mode with reload
-	$(POETRY) run uvicorn hermes.main:app --host 0.0.0.0 --port 8000 --reload
-
-run-worker: ## Run the TTS worker
-	$(POETRY) run python -m hermes.workers.tts_worker
+	uv run uvicorn hermes.main:app --host 0.0.0.0 --port 8000 --reload
 
 seed-kb: ## Seed the knowledge base
-	$(POETRY) run python scripts/seed_knowledge_base.py
+	uv run python scripts/seed_knowledge_base.py
 
 # =============================================================================
 # Docker
@@ -85,11 +81,20 @@ seed-kb: ## Seed the knowledge base
 build: ## Build Docker image
 	$(DOCKER) build -t hermes:latest .
 
+build-cosyvoice2: ## Build the CosyVoice2 TTS server image (GPU required)
+	$(DOCKER) build -t hermes-cosyvoice2:latest -f docker/cosyvoice2/Dockerfile .
+
 up: ## Start services with docker-compose
 	$(COMPOSE) up -d
 
+up-gpu: ## Start all services including CosyVoice2 (GPU required)
+	$(COMPOSE) --profile gpu up -d
+
 down: ## Stop services with docker-compose
 	$(COMPOSE) down
+
+down-gpu: ## Stop all services including GPU profile
+	$(COMPOSE) --profile gpu down
 
 logs: ## View docker-compose logs
 	$(COMPOSE) logs -f
@@ -98,27 +103,14 @@ shell: ## Open a shell in the app container
 	$(COMPOSE) exec app /bin/bash
 
 # =============================================================================
-# Database
-# =============================================================================
-
-db-migrate: ## Run database migrations
-	$(POETRY) run alembic upgrade head
-
-db-rollback: ## Rollback database migrations
-	$(POETRY) run alembic downgrade -1
-
-db-revision: ## Create a new migration revision (usage: make db-revision MSG="description")
-	$(POETRY) run alembic revision --autogenerate -m "$(MSG)"
-
-# =============================================================================
 # Utilities
 # =============================================================================
 
 benchmark-tts: ## Benchmark TTS latency
-	$(POETRY) run python scripts/benchmark_tts.py
+	uv run python scripts/benchmark_tts.py
 
 security-check: ## Run security checks
-	$(POETRY) run bandit -r hermes
+	uv run bandit -r hermes
 
 pre-commit: ## Run pre-commit hooks
-	$(POETRY) run pre-commit run --all-files
+	uv run pre-commit run --all-files

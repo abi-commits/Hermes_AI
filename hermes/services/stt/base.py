@@ -1,0 +1,42 @@
+"""Abstract base class for Speech-to-Text services."""
+
+from __future__ import annotations
+
+import asyncio
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
+
+
+class AbstractSTTService(ABC):
+    """Interface contract for all STT service implementations."""
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Open a connection / warm up the underlying service."""
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Close any open connections and release resources."""
+
+    # ------------------------------------------------------------------
+    # Transcription
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def transcribe(self, audio: "torch.Tensor") -> str:
+        """Transcribe a complete PCM float32 audio tensor (non-streaming)."""
+
+    @abstractmethod
+    async def stream_transcribe(
+        self,
+        audio_queue: "asyncio.Queue[torch.Tensor]",
+    ) -> AsyncIterator[str]:
+        """Yield transcript fragments in real-time from a live audio queue."""

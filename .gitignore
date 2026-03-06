@@ -55,7 +55,6 @@ logs/
 *.pth
 *.onnx
 *.bin
-/models/
 checkpoints/
 
 # Data

@@ -2,20 +2,21 @@
 
 import pytest
 
-from hermes.services.llm import MockLLMService
+from hermes.models.llm import ConversationTurn, InterruptMarker, LLMConfig
+from hermes.services.llm import GeminiLLMService, MockGeminiLLMService
 
 
-class TestMockLLMService:
-    """Tests for Mock LLM service."""
+class TestMockGeminiLLMService:
+    """Tests for Mock Gemini LLM service."""
 
     @pytest.mark.asyncio
     async def test_mock_generate_returns_response(self):
         """Test that mock service returns response."""
-        service = MockLLMService(responses=["Test response"])
+        service = MockGeminiLLMService(responses=["Test response"])
 
         result = await service.generate(
+            prompt="Test query",
             context="Some context",
-            query="Test query"
         )
 
         assert result == "Test response"
@@ -23,23 +24,121 @@ class TestMockLLMService:
     @pytest.mark.asyncio
     async def test_mock_generate_cycles_responses(self):
         """Test that mock service cycles through responses."""
-        service = MockLLMService(responses=["A", "B", "C"])
+        service = MockGeminiLLMService(responses=["A", "B", "C"])
 
         results = []
         for _ in range(4):
-            result = await service.generate("ctx", "query")
+            result = await service.generate(prompt="query")
             results.append(result)
 
         assert results == ["A", "B", "C", "A"]
 
     @pytest.mark.asyncio
-    async def test_mock_generate_stream_yields_chunks(self):
+    async def test_mock_stream_sentences_yields_chunks(self):
         """Test that mock stream yields chunks."""
-        service = MockLLMService(responses=["Hello world"])
+        service = MockGeminiLLMService(responses=["Hello world"])
 
         chunks = []
-        async for chunk in service.generate_stream("ctx", "query"):
+        async for chunk in service.stream_sentences(prompt="query"):
             chunks.append(chunk)
 
         assert len(chunks) > 0
-        assert "".join(chunks).strip() == "Hello world"
+        assert "".join(str(c) for c in chunks).strip() == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_mock_stream_no_interrupt_marker_by_default(self):
+        """Test that no InterruptMarker appears without an interruption check."""
+        service = MockGeminiLLMService(responses=["Quick reply"])
+
+        async for chunk in service.stream_sentences(prompt="q"):
+            assert not isinstance(chunk, InterruptMarker)
+
+    @pytest.mark.asyncio
+    async def test_mock_stream_with_interruption(self):
+        """Test that mock stream yields InterruptMarker when interrupted."""
+        service = MockGeminiLLMService(responses=["This is a long response"])
+
+        interrupted = False
+        call_count = 0
+
+        def interruption_check():
+            nonlocal call_count
+            call_count += 1
+            return call_count > 2  # Interrupt after 2 chunks
+
+        chunks = []
+        async for chunk in service.stream_sentences(
+            prompt="query", interruption_check=interruption_check
+        ):
+            chunks.append(chunk)
+            if isinstance(chunk, InterruptMarker):
+                interrupted = True
+                break
+
+        assert interrupted
+
+
+class TestLLMConfig:
+    """Tests for LLM configuration."""
+
+    def test_default_config(self):
+        """Test default config values."""
+        config = LLMConfig()
+        assert config.model_name == "gemini-2.5-flash"
+        assert config.temperature == 0.7
+        assert config.max_output_tokens == 2048
+        assert config.timeout_s == 60.0
+
+    def test_custom_config(self):
+        """Test custom config values."""
+        config = LLMConfig(
+            model_name="gemini-2.5-pro",
+            temperature=0.3,
+            max_output_tokens=1024,
+            timeout_s=30.0,
+        )
+        assert config.model_name == "gemini-2.5-pro"
+        assert config.temperature == 0.3
+        assert config.timeout_s == 30.0
+
+
+class TestBuildPrompt:
+    """Tests for prompt construction."""
+
+    def test_prompt_with_query_only(self):
+        """Test prompt with just a query."""
+        service = MockGeminiLLMService()
+        result = service._build_prompt("What is Hermes?", None, None)
+        assert "User: What is Hermes?" in result
+        assert "Assistant:" in result
+
+    def test_prompt_with_context(self):
+        """Test prompt with RAG context."""
+        service = MockGeminiLLMService()
+        result = service._build_prompt("query", "relevant docs here", None)
+        assert "Context information:" in result
+        assert "relevant docs here" in result
+
+    def test_prompt_with_history(self):
+        """Test prompt with conversation history."""
+        service = MockGeminiLLMService()
+        history = [
+            ConversationTurn(role="user", content="Hello"),
+            ConversationTurn(role="assistant", content="Hi there!"),
+        ]
+        result = service._build_prompt("follow up", None, history)
+        assert "Conversation history:" in result
+        assert "User: Hello" in result
+        assert "Assistant: Hi there!" in result
+
+    def test_prompt_with_interrupted_turn(self):
+        """Test prompt marks interrupted turns."""
+        service = MockGeminiLLMService()
+        history = [
+            ConversationTurn(
+                role="assistant", content="I was saying...", interrupted=True
+            ),
+        ]
+        result = service._build_prompt("go on", None, history)
+        assert "[INTERRUPTED]" in result
+
