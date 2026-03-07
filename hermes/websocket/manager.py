@@ -9,7 +9,7 @@ from fastapi import WebSocket
 from hermes.core.call import Call
 
 if TYPE_CHECKING:
-    from hermes.core.orchestrator import CallConfig, CallOrchestrator
+    from hermes.core.orchestrator import CallConfig, CallOrchestrator, ServiceBundle
     from hermes.websocket.schemas import MediaMessage, StartMessage
 
 logger = structlog.get_logger(__name__)
@@ -18,16 +18,22 @@ logger = structlog.get_logger(__name__)
 class ConnectionManager:
     """Manages active WebSocket connections and routes Twilio media frames to calls."""
 
-    def __init__(self) -> None:
-        """Initialise the connection manager."""
+    def __init__(self, bundle: "ServiceBundle | None" = None) -> None:
+        """Initialise the connection manager.
+
+        Args:
+            bundle: Optional service bundle for standalone mode (no orchestrator).
+                    When an orchestrator is attached via ``set_orchestrator``, the
+                    bundle is ignored — the orchestrator owns service injection.
+        """
         # call_sid → Call  (always maintained for fast lookups)
         self._active_calls: dict[str, Call] = {}
         # stream_sid → call_sid  (fast audio routing)
         self._stream_to_call: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._orchestrator: "CallOrchestrator | None" = None
+        self._bundle: "ServiceBundle | None" = bundle
         self._logger = structlog.get_logger(__name__)
-        self._services = services
 
     # ------------------------------------------------------------------
     # Orchestrator integration
@@ -62,13 +68,24 @@ class ConnectionManager:
                 config=config,
             )
         else:
-            # Standalone mode (no orchestrator) — create call directly
+            # Standalone mode (no orchestrator) — create call and inject services
+            # from the ServiceBundle so the service boundary is preserved.
+            if self._bundle is None:
+                self._logger.warning(
+                    "standalone_no_service_bundle",
+                    hint="Pass a ServiceBundle to ConnectionManager for standalone use",
+                )
+            stt = self._bundle.stt_factory() if self._bundle else None
             async with self._lock:
                 call = Call(
                     call_sid=call_sid,
                     stream_sid=stream_sid,
                     websocket=websocket,
                     account_sid=account_sid,
+                    stt_service=stt,
+                    llm_service=self._bundle.llm_service if self._bundle else None,
+                    tts_service=self._bundle.tts_service if self._bundle else None,
+                    rag_service=self._bundle.rag_service if self._bundle else None,
                 )
                 self._active_calls[call_sid] = call
             await call.start()
@@ -200,13 +217,6 @@ class ConnectionManager:
         self._logger.debug("active_calls_metrics", **metrics)
 
 
-def get_connection_manager(services: "ServiceContainer | None" = None) -> ConnectionManager:
-    """Create a ConnectionManager with the given service container.
-
-    Args:
-        services: Service container for dependency injection.
-
-    Returns:
-        A new ConnectionManager instance.
-    """
-    return ConnectionManager(services=services)
+# Module-level singleton — shared by main.py, api/calls.py, and the WebSocket handler.
+# The orchestrator is attached at startup via ``connection_manager.set_orchestrator()``.
+connection_manager = ConnectionManager()

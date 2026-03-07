@@ -8,6 +8,7 @@ from typing import Callable
 import structlog
 
 from hermes.models.llm import ConversationTurn, InterruptMarker, LLMConfig
+from hermes.prompts.prompt_manager import PromptManager
 from hermes.services.llm.base import AbstractLLMService
 
 logger = structlog.get_logger(__name__)
@@ -19,18 +20,49 @@ class MockGeminiLLMService(AbstractLLMService):
     def __init__(
         self,
         responses: list[str] | None = None,
+        prompt_manager: PromptManager | None = None,
+        prompt_name: str = "default",
         **_kwargs,  # absorb any extra kwargs callers may pass
     ) -> None:
         """Initialise the mock LLM service."""
         # Expose the same attributes as GeminiLLMService so duck-typed code works.
         self.config = LLMConfig()
-        self.system_instruction: str | None = None
+        self.prompt_manager = prompt_manager
         self.tools: list[Callable] | None = None
         self.client = None  # type: ignore[assignment]
+
+        # Load system instruction from PromptManager if available
+        if prompt_manager:
+            system_prompt = prompt_manager.get_system_prompt(prompt_name)
+            self.system_instruction = system_prompt.system_prompt
+        else:
+            self.system_instruction = None
 
         self._responses = responses or ["Mock response from Hermes."]
         self._index = 0
         self._logger = structlog.get_logger(__name__)
+
+    def _build_prompt(
+        self,
+        query: str,
+        context: str | None,
+        history: list[ConversationTurn] | None,
+    ) -> str:
+        """Match the prompt-building shape of ``GeminiLLMService`` for tests."""
+        parts: list[str] = []
+
+        if context:
+            parts.append(f"Context information:\n{context}\n")
+
+        if history:
+            history_lines = []
+            for turn in history:
+                prefix = "[INTERRUPTED] " if turn.interrupted else ""
+                history_lines.append(f"{turn.role.capitalize()}: {prefix}{turn.content}")
+            parts.append("Conversation history:\n" + "\n".join(history_lines) + "\n")
+
+        parts.append(f"User: {query}\nAssistant:")
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Unary generation

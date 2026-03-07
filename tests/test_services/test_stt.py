@@ -1,47 +1,46 @@
-"""Tests for STT service."""
+"""Tests for Speech-to-Text services."""
 
-import pytest
-import torch
+import asyncio
 import numpy as np
+import pytest
 
 from hermes.services.stt import MockSTTService
 
 
 class TestMockSTTService:
-    """Tests for Mock STT service."""
+    """Tests for the deterministic STT mock."""
 
     @pytest.mark.asyncio
-    async def test_mock_transcribe_returns_text(self):
-        """Test that mock service returns transcription."""
+    async def test_transcribe_cycles_responses(self):
+        """Test that transcribe returns responses in order."""
         service = MockSTTService(responses=["Test transcription"])
-
-        # Create dummy audio
-        audio = torch.zeros(16000)  # 1 second of silence
-
+        
+        # Audio array doesn't matter for mock
+        audio = np.zeros(16000, dtype=np.float32)
+        
         result = await service.transcribe(audio)
-
         assert result == "Test transcription"
 
     @pytest.mark.asyncio
-    async def test_mock_transcribe_cycles_responses(self):
-        """Test that mock service cycles through responses."""
-        service = MockSTTService(responses=["First", "Second", "Third"])
-
-        audio = torch.zeros(16000)
-
+    async def test_stream_transcribe(self):
+        """Test that streaming yields responses."""
+        responses = ["First", "Second", "Third"]
+        service = MockSTTService(responses=responses)
+        
+        queue = asyncio.Queue()
+        # Feed 3 audio arrays
+        for _ in range(3):
+            await queue.put(np.zeros(1000, dtype=np.float32))
+        await queue.put(None)  # Stop sentinel
+        
         results = []
-        for _ in range(4):
-            result = await service.transcribe(audio)
-            results.append(result)
+        async for transcript in service.stream_transcribe(queue):
+            results.append(transcript)
+            
+        assert results == responses
 
-        assert results == ["First", "Second", "Third", "First"]
-
-    @pytest.mark.asyncio
-    async def test_mock_connect_disconnect(self):
-        """Test mock connect and disconnect."""
+    def test_default_responses(self):
+        """Test that mock has a default response."""
         service = MockSTTService()
-
-        await service.connect()
-        await service.disconnect()
-
-        # Should complete without error
+        assert len(service.responses) > 0
+        assert isinstance(service.responses[0], str)

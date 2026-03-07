@@ -1,91 +1,66 @@
-# =============================================================================
-# Stage 1: Builder
-# =============================================================================
-FROM python:3.13-slim AS builder
+FROM python:3.11-slim AS base
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-
-# Set work directory
-WORKDIR /app
-
-# Copy dependency files
-COPY pyproject.toml uv.lock* ./
-
-# Install dependencies (without dev dependencies)
-RUN uv sync --no-dev --no-install-project --extra all
-
-# =============================================================================
-# Stage 2: Production
-# =============================================================================
-FROM python:3.13-slim AS production
-
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
     APP_HOME=/app \
     PORT=8000
 
-# Create non-root user
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-
-# Set work directory
-WORKDIR $APP_HOME
-
-# Copy virtualenv from builder
-COPY --from=builder /app/.venv ./.venv
-
-# Copy application code
-COPY --chown=appuser:appgroup hermes/ ./hermes/
-COPY --chown=appuser:appgroup config/ ./config/
-COPY --chown=appuser:appgroup pyproject.toml ./
-
-# Switch to non-root user
-USER appuser
-
-# Expose port
-EXPOSE $PORT
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-# Run the application
-CMD [".venv/bin/uvicorn", "hermes.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
-
-# =============================================================================
-# Stage 3: Development
-# =============================================================================
-FROM builder AS development
-
-# Install dev dependencies
-RUN uv sync --extra all
-
-# Set work directory
 WORKDIR /app
 
-# Copy application code
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    libffi-dev \
+    libgomp1 \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+
+# Builder stage: install dependencies
+FROM base AS builder
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project --extra all
+
+
+# Production stage: minimal image with only runtime dependencies
+FROM base AS production
+
+RUN groupadd --system appgroup && useradd --system --gid appgroup --create-home appuser
+
+COPY --from=builder /app/.venv /app/.venv
+COPY --chown=appuser:appgroup hermes/ ./hermes/
+COPY --chown=appuser:appgroup config/ ./config/
+COPY --chown=appuser:appgroup modal_deploy/ ./modal_deploy/
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)" || exit 1
+
+CMD ["uvicorn", "hermes.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+# Development stage: full environment with dev tools and hot-reload
+FROM base AS development
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --extra all
+
 COPY . .
 
-# Run in development mode with reload
+# Keep development as root for convenience (shared volumes may need root permissions)
+ENV PATH="/app/.venv/bin:${PATH}"
+
 CMD ["uv", "run", "uvicorn", "hermes.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

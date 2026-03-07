@@ -1,4 +1,4 @@
-.PHONY: help install update clean test test-cov lint format type-check check run run-dev build up down logs shell
+.PHONY: help install update clean test test-cov lint format type-check check run run-dev build up down logs shell modal-install modal-serve modal-deploy modal-deploy-prod modal-deploy-tts modal-preflight modal-smoke-tts
 
 PYTHON := python3
 DOCKER := docker
@@ -14,6 +14,9 @@ help: ## Show this help message
 
 install: ## Install dependencies
 	uv sync --extra all
+
+modal-install: ## Install dependencies including Modal tooling
+	uv sync --extra all --extra modal
 
 update: ## Update dependencies
 	uv lock --upgrade
@@ -71,6 +74,24 @@ run: ## Run the application
 run-dev: ## Run the application in development mode with reload
 	uv run uvicorn hermes.main:app --host 0.0.0.0 --port 8000 --reload
 
+modal-preflight: ## Validate the Modal deployment module locally
+	uv run --extra modal python -m modal_deploy.app --check
+
+modal-serve: ## Serve the Modal app locally
+	uv run --extra modal modal serve modal_deploy/app.py
+
+modal-deploy-tts: ## Deploy the dedicated Modal GPU TTS worker
+	uv run --extra modal modal deploy modal_deploy/tts.py
+
+modal-smoke-tts: ## Smoke test the deployed Modal GPU TTS worker via the Hermes adapter
+	TTS_PROVIDER=modal_remote uv run --extra modal python -m modal_deploy.smoke_test
+
+modal-deploy: ## Deploy Hermes to Modal using current environment variables
+	uv run --extra modal modal deploy modal_deploy/app.py
+
+modal-deploy-prod: ## Deploy Hermes to Modal in production mode
+	HERMES_MODAL_ENV=production uv run --extra modal modal deploy modal_deploy/app.py
+
 seed-kb: ## Seed the knowledge base
 	uv run python scripts/seed_knowledge_base.py
 
@@ -81,13 +102,10 @@ seed-kb: ## Seed the knowledge base
 build: ## Build Docker image
 	$(DOCKER) build -t hermes:latest .
 
-build-cosyvoice2: ## Build the CosyVoice2 TTS server image (GPU required)
-	$(DOCKER) build -t hermes-cosyvoice2:latest -f docker/cosyvoice2/Dockerfile .
-
 up: ## Start services with docker-compose
 	$(COMPOSE) up -d
 
-up-gpu: ## Start all services including CosyVoice2 (GPU required)
+up-gpu: ## Start all services including GPU profile
 	$(COMPOSE) --profile gpu up -d
 
 down: ## Stop services with docker-compose

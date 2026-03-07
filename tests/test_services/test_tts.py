@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-import torch
 
 from hermes.services.tts import ChatterboxTTSService, MockTTSService, TTSWorkerPool
 
@@ -57,11 +56,13 @@ class TestChatterboxTTSService:
     @pytest.mark.asyncio
     async def test_generate_calls_model(self):
         """generate() dispatches to the model via thread pool."""
-        fake_wav = torch.randn(1, 24000)
+        # Use a mock that behaves like a torch tensor's cpu().numpy() chain
+        mock_wav = MagicMock()
+        mock_wav.cpu.return_value.numpy.return_value = np.random.randn(1, 24000).astype(np.float32)
 
         with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
             mock_instance = MagicMock()
-            mock_instance.generate.return_value = fake_wav
+            mock_instance.generate.return_value = mock_wav
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
 
@@ -75,11 +76,12 @@ class TestChatterboxTTSService:
     @pytest.mark.asyncio
     async def test_generate_with_voice_prompt(self):
         """generate() passes audio_prompt_path to model."""
-        fake_wav = torch.randn(1, 24000)
+        mock_wav = MagicMock()
+        mock_wav.cpu.return_value.numpy.return_value = np.random.randn(1, 24000).astype(np.float32)
 
         with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
             mock_instance = MagicMock()
-            mock_instance.generate.return_value = fake_wav
+            mock_instance.generate.return_value = mock_wav
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
 
@@ -127,7 +129,7 @@ class TestResampleAndUlaw:
         assert len(resampled) == 16000
 
     def test_convert_to_ulaw(self):
-        """µ-law conversion produces 1 byte per sample."""
+        """Produce 1 byte per sample."""
         pcm = np.zeros(100, dtype=np.int16).tobytes()  # 200 bytes
         ulaw = ChatterboxTTSService.convert_to_ulaw(pcm)
         assert len(ulaw) == 100  # 1 byte per sample

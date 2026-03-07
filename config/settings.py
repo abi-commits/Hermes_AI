@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -117,52 +117,31 @@ class Settings(BaseSettings):
         description="Number of concurrent TTS generation threads",
     )
 
-    # ==========================================================================
-    # Text-to-Speech (CosyVoice2) — HTTP client settings
-    # ==========================================================================
-    cosyvoice2_host: str = Field(
-        default="localhost",
-        description="Hostname of the CosyVoice2 FastAPI server",
-    )
-    cosyvoice2_port: int = Field(
-        default=50000,
-        description="Port of the CosyVoice2 FastAPI server",
-    )
-    cosyvoice2_mode: str = Field(
-        default="zero_shot",
-        description="Inference mode: 'sft', 'zero_shot', 'cross_lingual', 'instruct2'",
-    )
-    cosyvoice2_spk_id: str = Field(
-        default="中文女",
-        description="Speaker ID for CosyVoice2 SFT mode",
-    )
-    cosyvoice2_prompt_text: str = Field(
-        default="",
-        description="Default prompt text for CosyVoice2 zero-shot voice cloning",
-    )
-    cosyvoice2_prompt_wav: str | None = Field(
-        default=None,
-        description="Path to reference WAV for CosyVoice2 zero-shot voice cloning",
-    )
-    cosyvoice2_instruct_text: str = Field(
-        default="",
-        description="Instruction text for CosyVoice2 instruct2 mode",
-    )
-    cosyvoice2_speed: float = Field(
-        default=1.0,
-        ge=0.5,
-        le=2.0,
-        description="CosyVoice2 speech speed multiplier",
-    )
-    cosyvoice2_timeout: float = Field(
-        default=60.0,
-        description="HTTP request timeout (seconds) for CosyVoice2 server",
-    )
-
     # TTS provider selection
-    tts_provider: str = Field(
+    tts_provider: Literal["chatterbox", "modal_remote"] = Field(
         default="chatterbox",
-        description="Active TTS provider: 'chatterbox' or 'cosyvoice2'",
+        description="Active TTS provider: 'chatterbox' or 'modal_remote'",
+    )
+    modal_tts_app_name: str = Field(
+        default="hermes-tts",
+        description="Modal app name for the remote TTS worker",
+    )
+    modal_tts_class_name: str = Field(
+        default="RemoteChatterboxTTSWorker",
+        description="Modal class name for the remote TTS worker",
+    )
+    modal_tts_sample_rate: int = Field(
+        default=24000,
+        description="Native PCM sample rate returned by the remote Modal TTS worker",
+    )
+    modal_tts_chunk_size: int = Field(
+        default=50,
+        ge=1,
+        description="Chunk size passed to the remote Modal TTS worker for streaming",
+    )
+    modal_tts_embed_watermark: bool = Field(
+        default=False,
+        description="Whether the remote Modal TTS worker should embed watermarks by default",
     )
 
     # Alternative TTS providers
@@ -216,14 +195,6 @@ class Settings(BaseSettings):
     pinecone_index: str = Field(
         default="hermes-knowledge",
         description="Pinecone index name",
-    )
-
-    # ==========================================================================
-    # Database
-    # ==========================================================================
-    database_url: PostgresDsn = Field(
-        default="postgresql://user:password@localhost:5432/hermes",
-        description="PostgreSQL connection URL",
     )
 
     # ==========================================================================
@@ -349,6 +320,31 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         """``True`` when running in development."""
         return self.app_env == "development"
+
+    def validate_production_requirements(self) -> None:
+        """Fail fast when critical production settings are missing."""
+        if not self.is_production:
+            return
+
+        missing: list[str] = []
+
+        required_values = {
+            "TWILIO_ACCOUNT_SID": self.twilio_account_sid,
+            "TWILIO_AUTH_TOKEN": self.twilio_auth_token,
+            "DEEPGRAM_API_KEY": self.deepgram_api_key,
+            "GEMINI_API_KEY": self.gemini_api_key,
+            "CHROMA_CLOUD_URL": self.chroma_cloud_url,
+            "CHROMA_CLOUD_API_KEY": self.chroma_cloud_api_key,
+        }
+
+        for env_name, value in required_values.items():
+            if not value:
+                missing.append(env_name)
+
+        if missing:
+            raise ValueError(
+                "Missing required production settings: " + ", ".join(sorted(missing))
+            )
 
 
 @lru_cache

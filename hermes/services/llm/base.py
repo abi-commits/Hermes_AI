@@ -32,7 +32,7 @@ class AbstractLLMService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def stream_sentences(
+    def stream_sentences(
         self,
         prompt: str,
         context: str | None = None,

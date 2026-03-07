@@ -16,7 +16,7 @@ class AbstractTTSService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def generate_stream(
+    def generate_stream(
         self,
         text: str,
         audio_prompt_path: str | Path | None = None,
