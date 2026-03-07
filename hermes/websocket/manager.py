@@ -1,14 +1,15 @@
 """WebSocket connection manager for active calls."""
 
+from __future__ import annotations
+
 import asyncio
 from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import WebSocket
 
-from hermes.core.call import Call
-
 if TYPE_CHECKING:
+    from hermes.core.call import Call
     from hermes.core.orchestrator import CallConfig, CallOrchestrator
     from hermes.websocket.schemas import MediaMessage, StartMessage
 
@@ -25,15 +26,14 @@ class ConnectionManager:
         # stream_sid → call_sid  (fast audio routing)
         self._stream_to_call: dict[str, str] = {}
         self._lock = asyncio.Lock()
-        self._orchestrator: "CallOrchestrator | None" = None
+        self._orchestrator: CallOrchestrator | None = None
         self._logger = structlog.get_logger(__name__)
-        self._services = services
 
     # ------------------------------------------------------------------
     # Orchestrator integration
     # ------------------------------------------------------------------
 
-    def set_orchestrator(self, orchestrator: "CallOrchestrator") -> None:
+    def set_orchestrator(self, orchestrator: CallOrchestrator) -> None:
         """Attach a ``CallOrchestrator``; must be called before any calls are handled."""
         self._orchestrator = orchestrator
         self._logger.info("orchestrator_attached")
@@ -45,8 +45,8 @@ class ConnectionManager:
     async def connect(
         self,
         websocket: WebSocket,
-        start_message: "StartMessage",
-        config: "CallConfig | None" = None,
+        start_message: StartMessage,
+        config: CallConfig | None = None,
     ) -> Call:
         """Handle a new Twilio WebSocket connection and start the call."""
         call_sid = start_message.start.call_sid
@@ -63,6 +63,8 @@ class ConnectionManager:
             )
         else:
             # Standalone mode (no orchestrator) — create call directly
+            from hermes.core.call import Call
+
             async with self._lock:
                 call = Call(
                     call_sid=call_sid,
@@ -76,9 +78,6 @@ class ConnectionManager:
         async with self._lock:
             # Always register the stream→call mapping for audio routing
             self._stream_to_call[stream_sid] = call_sid
-            # When an orchestrator is active it is the single source of truth for
-            # active-call state; do NOT mirror into ConnectionManager._active_calls
-            # to avoid the two dicts diverging under error conditions.
 
         self._logger.info(
             "call_connected",
@@ -125,7 +124,7 @@ class ConnectionManager:
     # Media routing
     # ------------------------------------------------------------------
 
-    async def handle_media(self, message: "MediaMessage") -> None:
+    async def handle_media(self, message: MediaMessage) -> None:
         """Route an incoming Twilio audio frame to the correct call."""
         stream_sid = message.stream_sid
         call_sid = self._stream_to_call.get(stream_sid)
@@ -200,13 +199,4 @@ class ConnectionManager:
         self._logger.debug("active_calls_metrics", **metrics)
 
 
-def get_connection_manager(services: "ServiceContainer | None" = None) -> ConnectionManager:
-    """Create a ConnectionManager with the given service container.
-
-    Args:
-        services: Service container for dependency injection.
-
-    Returns:
-        A new ConnectionManager instance.
-    """
-    return ConnectionManager(services=services)
+connection_manager = ConnectionManager()

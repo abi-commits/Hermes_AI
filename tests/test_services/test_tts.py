@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 import torch
 
-from hermes.services.tts import ChatterboxTTSService, MockTTSService, TTSWorkerPool
+from hermes.services.tts import (
+    ChatterboxTTSService,
+    MockTTSService,
+    TTSWorkerPool,
+    convert_to_ulaw,
+    resample_to_8khz,
+)
 
 
 class TestMockTTSService:
@@ -59,16 +65,17 @@ class TestChatterboxTTSService:
         """generate() dispatches to the model via thread pool."""
         fake_wav = torch.randn(1, 24000)
 
-        with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
+        with patch("chatterbox.tts.ChatterboxTTS") as MockModel:
             mock_instance = MagicMock()
-            mock_instance.generate.return_value = fake_wav
+            # ChatterboxTTS.generate_stream is a generator yielding (wav, metrics)
+            mock_instance.generate_stream.return_value = [(fake_wav, {})]
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
 
             service = ChatterboxTTSService(device="cpu")
             audio_bytes = await service.generate("Hello there")
 
-        mock_instance.generate.assert_called_once()
+        mock_instance.generate_stream.assert_called_once()
         assert isinstance(audio_bytes, bytes)
         assert len(audio_bytes) > 0
 
@@ -77,23 +84,23 @@ class TestChatterboxTTSService:
         """generate() passes audio_prompt_path to model."""
         fake_wav = torch.randn(1, 24000)
 
-        with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
+        with patch("chatterbox.tts.ChatterboxTTS") as MockModel:
             mock_instance = MagicMock()
-            mock_instance.generate.return_value = fake_wav
+            mock_instance.generate_stream.return_value = [(fake_wav, {})]
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
 
             service = ChatterboxTTSService(device="cpu")
             await service.generate("Hello there", audio_prompt_path="/tmp/ref.wav")
 
-        call_args = mock_instance.generate.call_args
+        call_args = mock_instance.generate_stream.call_args
         assert call_args[1].get("audio_prompt_path") == "/tmp/ref.wav" or \
                call_args[0][1] == "/tmp/ref.wav"
 
     @pytest.mark.asyncio
     async def test_generate_raises_on_no_model(self):
         """generate() raises TTSGenerationError when model is None."""
-        with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
+        with patch("chatterbox.tts.ChatterboxTTS") as MockModel:
             mock_instance = MagicMock()
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
@@ -103,7 +110,7 @@ class TestChatterboxTTSService:
 
             from hermes.core.exceptions import TTSGenerationError
 
-            with pytest.raises(TTSGenerationError, match="Model not loaded"):
+            with pytest.raises(TTSGenerationError, match="model is not loaded"):
                 await service.generate("Test")
 
 
@@ -112,7 +119,7 @@ class TestResampleAndUlaw:
 
     def test_resample_to_8khz(self):
         """Resampling 16 kHz PCM to 8 kHz halves the sample count."""
-        with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
+        with patch("chatterbox.tts.ChatterboxTTS") as MockModel:
             mock_instance = MagicMock()
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
@@ -121,7 +128,7 @@ class TestResampleAndUlaw:
 
         # Create 1s of 16 kHz silence (16000 int16 samples)
         pcm = np.zeros(16000, dtype=np.int16).tobytes()
-        resampled = service.resample_to_8khz(pcm, orig_sr=16000)
+        resampled = resample_to_8khz(pcm, orig_sr=16000)
 
         # 8000 samples * 2 bytes = 16000 bytes
         assert len(resampled) == 16000
@@ -129,7 +136,7 @@ class TestResampleAndUlaw:
     def test_convert_to_ulaw(self):
         """µ-law conversion produces 1 byte per sample."""
         pcm = np.zeros(100, dtype=np.int16).tobytes()  # 200 bytes
-        ulaw = ChatterboxTTSService.convert_to_ulaw(pcm)
+        ulaw = convert_to_ulaw(pcm)
         assert len(ulaw) == 100  # 1 byte per sample
 
 
@@ -138,7 +145,7 @@ class TestTTSWorkerPool:
 
     def test_pool_round_robin(self):
         """Workers are selected round-robin."""
-        with patch("hermes.services.tts.ChatterboxTurboTTS") as MockModel:
+        with patch("chatterbox.tts.ChatterboxTTS") as MockModel:
             mock_instance = MagicMock()
             mock_instance.sr = 24000
             MockModel.from_pretrained.return_value = mock_instance
