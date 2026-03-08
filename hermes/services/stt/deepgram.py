@@ -6,12 +6,12 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Union
 
+import numpy as np
 import structlog
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 try:
-    from deepgram import AsyncDeepgramClient  # type: ignore[import-untyped]
-    from deepgram.core.events import EventType  # type: ignore[import-untyped]
+    from deepgram import AsyncDeepgramClient, LiveTranscriptionEvents  # type: ignore[import-untyped]
     from deepgram.listen.v1.types import (  # type: ignore[import-untyped]
         ListenV1Metadata,
         ListenV1Results,
@@ -33,9 +33,6 @@ except ImportError:
 from config import get_settings
 from hermes.core.exceptions import ServiceUnavailableError, STTError
 from hermes.services.stt.base import AbstractSTTService
-
-if TYPE_CHECKING:
-    import torch
 
 logger = structlog.get_logger(__name__)
 
@@ -83,8 +80,8 @@ class DeepgramSTTService(AbstractSTTService):
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    async def transcribe(self, audio: "torch.Tensor") -> str:
-        """Transcribe a PCM tensor via the Deepgram pre-recorded API (retried up to 3x)."""
+    async def transcribe(self, audio: np.ndarray) -> str:
+        """Transcribe a PCM array via the Deepgram pre-recorded API (retried up to 3x)."""
         if not HAS_DEEPGRAM:
             raise ServiceUnavailableError("Deepgram", "Deepgram SDK not installed")
         if not self.settings.deepgram_api_key:
@@ -94,17 +91,17 @@ class DeepgramSTTService(AbstractSTTService):
             await self.connect()
 
         try:
-            import numpy as np
-
-            audio_bytes: bytes = (audio.numpy() * 32767).astype(np.int16).tobytes()
+            audio_bytes: bytes = (audio * 32767).astype(np.int16).tobytes()
 
             # v5 SDK: client.listen.v1.media.transcribe_file
             response = await self._client.listen.v1.media.transcribe_file(  # type: ignore[union-attr]
-                request=audio_bytes,
-                model=self.settings.deepgram_model,
-                language=self.settings.deepgram_language,
-                smart_format=True,
-                encoding="linear16",
+                {"buffer": audio_bytes},
+                {
+                    "model": self.settings.deepgram_model,
+                    "language": self.settings.deepgram_language,
+                    "smart_format": True,
+                    "encoding": "linear16",
+                }
             )
 
             transcript: str = ""
@@ -129,7 +126,7 @@ class DeepgramSTTService(AbstractSTTService):
 
     async def stream_transcribe(
         self,
-        audio_queue: "asyncio.Queue[torch.Tensor]",
+        audio_queue: asyncio.Queue[np.ndarray],
     ) -> AsyncIterator[str]:
         """Stream audio to Deepgram Live API (v5) and yield transcripts in real-time.
 
@@ -146,41 +143,37 @@ class DeepgramSTTService(AbstractSTTService):
         if self._client is None:
             await self.connect()
 
-        import numpy as np
-
         # Queue used to ferry transcripts from the synchronous event callback
         # back into this async generator.
         transcript_queue: asyncio.Queue[str | None] = asyncio.Queue()
         loop = asyncio.get_event_loop()
 
-        async with self._client.listen.v1.connect(  # type: ignore[union-attr]
-            model=self.settings.deepgram_model,
-            language=self.settings.deepgram_language,
-            smart_format="true",
-            interim_results="true",
-            utterance_end_ms="1000",
-            encoding="linear16",
-        ) as connection:
+        options = {
+            "model": self.settings.deepgram_model,
+            "language": self.settings.deepgram_language,
+            "smart_format": "true",
+            "interim_results": "true",
+            "utterance_end_ms": "1000",
+            "encoding": "linear16",
+            "sample_rate": 8000, # Twilio rate
+        }
+
+        async with self._client.listen.v1.connect(options) as connection:  # type: ignore[union-attr]
 
             # ----------------------------------------------------------------
             # Event handlers
             # ----------------------------------------------------------------
 
-            def _on_message(message: "ListenV1SocketClientResponse") -> None:  # type: ignore[name-defined]
-                if isinstance(message, ListenV1Results):  # type: ignore[possibly-undefined]
-                    channel = getattr(message, "channel", None)
-                    alternatives = getattr(channel, "alternatives", None) if channel else None
-                    transcript = alternatives[0].transcript if alternatives else None
-                    if transcript:
-                        asyncio.run_coroutine_threadsafe(
-                            transcript_queue.put(transcript), loop
-                        )
+            async def _on_message(self, message: ListenV1Results, **kwargs) -> None:  # type: ignore[name-defined]
+                transcript = message.channel.alternatives[0].transcript
+                if transcript:
+                    await transcript_queue.put(transcript)
 
-            def _on_error(error: object) -> None:
+            async def _on_error(self, error: object, **kwargs) -> None:
                 self._logger.error("deepgram_live_error", error=str(error))
 
-            connection.on(EventType.MESSAGE, _on_message)  # type: ignore[possibly-undefined]
-            connection.on(EventType.ERROR, _on_error)  # type: ignore[possibly-undefined]
+            connection.on(LiveTranscriptionEvents.Transcript, _on_message)  # type: ignore[possibly-undefined]
+            connection.on(LiveTranscriptionEvents.Error, _on_error)  # type: ignore[possibly-undefined]
 
             # Start listener as a background task so audio sending is concurrent.
             listen_task = asyncio.create_task(connection.start_listening())
@@ -194,7 +187,7 @@ class DeepgramSTTService(AbstractSTTService):
                     audio = await audio_queue.get()
                     if audio is None:
                         break
-                    audio_bytes = (audio.numpy() * 32767).astype(np.int16).tobytes()
+                    audio_bytes = (audio * 32767).astype(np.int16).tobytes()
                     await connection.send_media(audio_bytes)
 
                     # Drain any already-arrived transcripts

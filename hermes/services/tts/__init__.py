@@ -23,15 +23,51 @@ Audio helpers
     Encode 16-bit PCM to 8-bit µ-law (G.711 PCMU, Twilio format).
 """
 
-from hermes.services.tts.audio import convert_to_ulaw, resample_to_8khz
-from hermes.services.tts.base import AbstractTTSService
-from hermes.services.tts.chatterbox import ChatterboxTTSService
-from hermes.services.tts.mock import MockTTSService
-from hermes.services.tts.worker_pool import TTSWorkerPool
+from __future__ import annotations
+
+from typing import Any
+from importlib import import_module
+
+class ChatterboxTurboTTS:
+    """Lazy proxy around the Chatterbox model class.
+
+    Keeping this import lazy avoids making ``import hermes.services.tts`` fail in
+    environments where heavyweight optional dependencies are partially present.
+    """
+
+    @classmethod
+    def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+        """Load and return the concrete Chatterbox model."""
+        from chatterbox.tts import ChatterboxTTS
+
+        return ChatterboxTTS.from_pretrained(*args, **kwargs)
+
+
+# Lazy loading mapping
+_EXPORTS = {
+    "AbstractTTSService": ("hermes.services.tts.base", "AbstractTTSService"),
+    "ChatterboxTTSService": ("hermes.services.tts.chatterbox", "ChatterboxTTSService"),
+    "ModalRemoteTTSService": ("hermes.services.tts.modal_remote", "ModalRemoteTTSService"),
+    "MockTTSService": ("hermes.services.tts.mock", "MockTTSService"),
+    "TTSWorkerPool": ("hermes.services.tts.worker_pool", "TTSWorkerPool"),
+    "convert_to_ulaw": ("hermes.services.tts.audio", "convert_to_ulaw"),
+    "resample_to_8khz": ("hermes.services.tts.audio", "resample_to_8khz"),
+}
+
+def __getattr__(name: str) -> Any:
+    if name in _EXPORTS:
+        module_path, attr_name = _EXPORTS[name]
+        module = import_module(module_path)
+        attr = getattr(module, attr_name)
+        globals()[name] = attr
+        return attr
+    raise AttributeError(f"module {__name__} has no attribute {name}")
 
 __all__ = [
     "AbstractTTSService",
+    "ChatterboxTurboTTS",
     "ChatterboxTTSService",
+    "ModalRemoteTTSService",
     "MockTTSService",
     "TTSWorkerPool",
     "convert_to_ulaw",

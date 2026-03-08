@@ -24,6 +24,7 @@ from hermes.models.llm import (
     LLMConfig,
     LLMGenerationError,
 )
+from hermes.prompts.prompt_manager import PromptManager
 from hermes.services.llm.base import AbstractLLMService
 
 logger = logging.getLogger(__name__)
@@ -67,11 +68,36 @@ class GeminiLLMService(AbstractLLMService):
         config: LLMConfig | None = None,
         system_instruction: str | None = None,
         tools: list[Callable] | None = None,
+        prompt_manager: PromptManager | None = None,
+        prompt_name: str = "default",
     ) -> None:
-        """Initialise the Gemini LLM service."""
+        """Initialise the Gemini LLM service.
+
+        Args:
+            api_key: Gemini API key (uses GOOGLE_API_KEY env var if not provided).
+            config: Generation parameters for the LLM.
+            system_instruction: Explicit system instruction (overrides prompt_manager).
+            tools: List of Gemini function-calling tools.
+            prompt_manager: PromptManager instance to load system prompts from.
+            prompt_name: Name of the system prompt to load (default: "default").
+        """
         self.config = config or LLMConfig()
-        self.system_instruction = system_instruction
+        self.prompt_manager = prompt_manager
         self.tools = tools
+
+        # Load system instruction from PromptManager if available and not explicitly set
+        if system_instruction:
+            self.system_instruction = system_instruction
+        elif prompt_manager:
+            system_prompt = prompt_manager.get_system_prompt(prompt_name)
+            self.system_instruction = system_prompt.system_prompt
+            logger.info(
+                "GeminiLLMService loaded system prompt: %s (temperature: %.1f)",
+                prompt_name,
+                system_prompt.temperature,
+            )
+        else:
+            self.system_instruction = None
 
         self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
 

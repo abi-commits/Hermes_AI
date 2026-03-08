@@ -12,32 +12,95 @@ Hermes provides real-time voice assistance by integrating:
 
 ## Architecture
 
+### Current Production Deployment
+
+```text
+┌────────────────────┐
+│       Caller       │
+│   PSTN / Mobile    │
+└─────────┬──────────┘
+          │ phone call
+          ▼
+┌────────────────────┐
+│       Twilio       │
+│  Voice + Media WS  │
+└───────┬─────┬──────┘
+        │     │
+        │     └─────────────────────────────── outbound audio (8 kHz mu-law)
+        │
+        │ webhook + bidirectional WebSocket
+        ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    Modal: Hermes API Service                      │
+│                                                                    │
+│  FastAPI app                                                       │
+│  - /twilio/voice                                                   │
+│  - /twilio/status                                                  │
+│  - /stream/{call_sid}                                              │
+│                                                                    │
+│  Runtime components                                                │
+│  - ConnectionManager                                               │
+│  - CallOrchestrator                                                │
+│  - Per-call state machine                                          │
+│  - Audio resample + mu-law encoding for Twilio                     │
+│                                                                    │
+│  Service clients                                                   │
+│  - Deepgram STT                                                    │
+│  - Gemini LLM                                                      │
+│  - Chroma RAG                                                      │
+│  - ModalRemoteTTSService                                           │
+└───────────────┬───────────────────────┬───────────────────────┬────┘
+                │                       │                       │
+                │ transcripts           │ prompts/context       │ retrieval
+                ▼                       ▼                       ▼
+       ┌────────────────┐      ┌────────────────┐     ┌──────────────────┐
+       │    Deepgram    │      │     Gemini     │     │ Chroma Cloud /   │
+       │      STT       │      │      LLM       │     │ External VectorDB│
+       └────────────────┘      └────────────────┘     └──────────────────┘
+                │
+                │ PCM stream requests
+                ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                Modal: Dedicated GPU TTS Worker                    │
+│                                                                    │
+│  RemoteChatterboxTTSWorker                                         │
+│  - GPU-backed Chatterbox model                                     │
+│  - returns native-rate PCM                                         │
+│  - streams PCM chunks back to Hermes                               │
+│                                                                    │
+│  Default GPU: L4                                                   │
+└────────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────┐     WebSocket      ┌─────────────────────────────────────┐
-│   Twilio    │◄──────────────────►│              Hermes                 │
-│   (Phone)   │   (μ-law 8kHz)     │  ┌─────────┐ ┌─────┐ ┌─────────┐   │
-└─────────────┘                    │  │   STT   │ │ LLM │ │   TTS   │   │
-                                   │  │(Deepgrm)│ │(Gem)│ │(ChatBox)│   │
-                                   │  └────┬────┘ └──┬──┘ └────┬────┘   │
-                                   │       │         │         │        │
-                                   │  ┌────┴─────────┴─────────┴────┐   │
-                                   │  │      Call State Machine      │   │
-                                   │  └──────────────────────────────┘   │
-                                   └─────────────────────────────────────┘
-                                              │
-                                              ▼
-                                        ┌──────────┐
-                                        │ VectorDB │
-                                        │ (RAG)    │
-                                        └──────────┘
-```
+
+### Responsibilities
+
+- Twilio: telephony, inbound call webhook, bidirectional media stream
+- Hermes API on Modal: call control, orchestration, STT/LLM/RAG coordination, Twilio-compatible audio output
+- Dedicated Modal GPU worker: text-to-speech synthesis only
+- Deepgram: speech-to-text
+- Gemini: response generation
+- Chroma: retrieval-augmented context
+
+### Why the TTS worker is separate
+
+The API service keeps ownership of:
+
+- live call state
+- interruption and barge-in behavior
+- Twilio audio formatting
+- orchestration across STT, LLM, and RAG
+
+The GPU worker only handles:
+
+- Chatterbox inference
+- returning native PCM audio back to Hermes
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- Poetry
+- uv (modern Python package manager)
 - Docker & Docker Compose (optional)
 - Twilio account
 - Deepgram API key
@@ -53,7 +116,7 @@ cd hermes
 
 2. Install dependencies:
 ```bash
-poetry install --extras all
+uv sync --extra all
 ```
 
 3. Copy environment variables:
@@ -69,7 +132,7 @@ docker-compose up -d
 
 Or run locally:
 ```bash
-poetry run uvicorn hermes.main:app --reload
+uv run uvicorn hermes.main:app --reload
 ```
 
 ## Development

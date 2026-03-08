@@ -11,16 +11,47 @@ from config import get_settings
 from hermes import __version__
 from hermes.api import calls_router, health_router, knowledge_router, metrics_router, twilio_router
 from hermes.api.metrics import APP_INFO, MetricsCollector
-from hermes.core.orchestrator import CallOrchestrator, ServiceBundle
-from hermes.models.llm import LLMConfig
-from hermes.services.llm import GeminiLLMService
-from hermes.services.rag import ChromaRAGService
-from hermes.services.stt import DeepgramSTTService
-from hermes.services.tts import ChatterboxTTSService
-from hermes.websocket.handler import websocket_router
 from hermes.websocket.manager import connection_manager
 
 logger = structlog.get_logger(__name__)
+
+
+def build_tts_service(settings):
+    """Create the configured TTS service implementation."""
+    if settings.tts_provider == "modal_remote":
+        from hermes.services.tts import ModalRemoteTTSService
+        service = ModalRemoteTTSService(
+            app_name=settings.modal_tts_app_name,
+            class_name=settings.modal_tts_class_name,
+            sample_rate=settings.modal_tts_sample_rate,
+            default_chunk_size=settings.modal_tts_chunk_size,
+            default_embed_watermark=settings.modal_tts_embed_watermark,
+        )
+        logger.info(
+            "tts_service_selected",
+            provider="modal_remote",
+            modal_app=settings.modal_tts_app_name,
+            modal_class=settings.modal_tts_class_name,
+        )
+        return service
+
+    # Local chatterbox requires torch/torchaudio
+    from hermes.services.tts import ChatterboxTTSService
+    service = ChatterboxTTSService(
+        device=settings.chatterbox_device,
+        watermark_key=(
+            bytes.fromhex(settings.chatterbox_watermark_key)
+            if settings.chatterbox_watermark_key
+            else None
+        ),
+        num_workers=settings.chatterbox_num_workers,
+    )
+    logger.info(
+        "tts_service_selected",
+        provider="chatterbox",
+        device=settings.chatterbox_device,
+    )
+    return service
 
 
 def setup_logging() -> None:
@@ -50,6 +81,7 @@ def setup_logging() -> None:
 async def lifespan(app: FastAPI):
     """Initialise and shut down all application services."""
     settings = get_settings()
+    settings.validate_production_requirements()
     logger.info(
         "startup",
         app_name=settings.app_name,
@@ -60,6 +92,14 @@ async def lifespan(app: FastAPI):
 
     # Startup: Initialize services
     try:
+        # Import services locally to keep the main process lightweight
+        from hermes.core.orchestrator import CallOrchestrator, ServiceBundle
+        from hermes.models.llm import LLMConfig
+        from hermes.prompts.prompt_manager import PromptManager
+        from hermes.services.llm import GeminiLLMService
+        from hermes.services.rag import ChromaRAGService
+        from hermes.services.stt import DeepgramSTTService
+
         # 1. RAG — warm up eagerly so the first call pays no cold-start cost
         app.state.rag_service = ChromaRAGService()
         try:
@@ -74,19 +114,12 @@ async def lifespan(app: FastAPI):
             thread_name_prefix="tts-worker",
         )
         app.state.tts_executor = tts_executor
-        app.state.tts_service = ChatterboxTTSService(
-            device=settings.chatterbox_device,
-            watermark_key=(
-                bytes.fromhex(settings.chatterbox_watermark_key)
-                if settings.chatterbox_watermark_key
-                else None
-            ),
-            num_workers=settings.chatterbox_num_workers,
-        )
+        app.state.tts_service = build_tts_service(settings)
         app.state.tts_service.set_executor(tts_executor)
-        logger.info("tts_service_initialized", device=settings.chatterbox_device)
+        logger.info("tts_service_initialized", provider=settings.tts_provider)
 
-        # 3. LLM — shared Gemini instance (stateless per-request)
+        # 3. LLM — shared Gemini instance with prompt management (stateless per-request)
+        prompt_manager = PromptManager()
         app.state.llm_service = GeminiLLMService(
             api_key=settings.gemini_api_key,
             config=LLMConfig(
@@ -94,12 +127,12 @@ async def lifespan(app: FastAPI):
                 temperature=settings.gemini_temperature,
                 max_output_tokens=settings.gemini_max_tokens,
             ),
+            prompt_manager=prompt_manager,
+            prompt_name=getattr(settings, "llm_prompt_name", "default"),
         )
         logger.info("llm_service_initialized", model=settings.gemini_model)
 
         # 4. Build the service bundle and orchestrator
-        #    STT is a factory (DeepgramSTTService) because each call needs its
-        #    own Deepgram live WebSocket connection.
         bundle = ServiceBundle(
             stt_factory=DeepgramSTTService,
             llm_service=app.state.llm_service,
@@ -108,6 +141,7 @@ async def lifespan(app: FastAPI):
         )
         app.state.orchestrator = CallOrchestrator(bundle)
         connection_manager.set_orchestrator(app.state.orchestrator)
+        app.state.connection_manager = connection_manager
         logger.info("orchestrator_initialized")
 
         # Update Prometheus app info
@@ -144,6 +178,9 @@ def create_app() -> FastAPI:
         debug=settings.debug,
         lifespan=lifespan,
     )
+
+    # Import router here to ensure it uses the lightweight websocket_router
+    from hermes.websocket.handler import websocket_router
 
     # CORS middleware — restrict origins in production
     allowed_origins = ["*"] if settings.is_development else [f"https://{settings.host}"]

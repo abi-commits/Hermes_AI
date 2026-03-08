@@ -1,7 +1,6 @@
 """Tests for audio processing utilities."""
 
 import pytest
-import torch
 import numpy as np
 
 from hermes.core.audio import (
@@ -21,7 +20,7 @@ class TestMuLawCodec:
     def test_encode_decode_roundtrip(self):
         """Test that encode/decode is lossy but reversible."""
         # Create test audio
-        original = torch.sin(torch.linspace(0, 2 * np.pi, 8000)) * 0.5
+        original = np.sin(np.linspace(0, 2 * np.pi, 8000)).astype(np.float32) * 0.5
 
         # Encode then decode
         encoded = encode_mulaw(original)
@@ -29,22 +28,23 @@ class TestMuLawCodec:
 
         # Should be approximately the same (mu-law is lossy)
         assert len(decoded) == len(original)
-        assert decoded.abs().max() <= 1.0
+        assert np.abs(decoded).max() <= 1.0
 
     def test_encode_returns_bytes(self):
         """Test that encoding returns bytes."""
-        audio = torch.zeros(100)
+        audio = np.zeros(100, dtype=np.float32)
         encoded = encode_mulaw(audio)
 
         assert isinstance(encoded, bytes)
         assert len(encoded) == 100
 
-    def test_decode_returns_tensor(self):
-        """Test that decoding returns tensor."""
+    def test_decode_returns_array(self):
+        """Test that decoding returns numpy array."""
         encoded = b"\xff" * 100
         decoded = decode_mulaw(encoded)
 
-        assert isinstance(decoded, torch.Tensor)
+        assert isinstance(decoded, np.ndarray)
+        assert decoded.dtype == np.float32
         assert len(decoded) == 100
 
 
@@ -54,7 +54,7 @@ class TestResampling:
     def test_resample_changes_sample_rate(self):
         """Test that resampling changes the sample count."""
         # 1 second at 16kHz
-        audio = torch.randn(16000)
+        audio = np.random.randn(16000).astype(np.float32)
 
         # Resample to 8kHz
         resampled = resample_audio(audio, orig_freq=16000, new_freq=8000)
@@ -64,10 +64,10 @@ class TestResampling:
 
     def test_resample_no_change_same_rate(self):
         """Test that same rate returns unchanged."""
-        audio = torch.randn(16000)
+        audio = np.random.randn(16000).astype(np.float32)
         resampled = resample_audio(audio, orig_freq=16000, new_freq=16000)
 
-        assert torch.allclose(audio, resampled)
+        assert np.allclose(audio, resampled)
 
 
 class TestFormatConversion:
@@ -75,7 +75,7 @@ class TestFormatConversion:
 
     def test_float_to_int16(self):
         """Test float to int16 conversion."""
-        audio = torch.tensor([0.0, 0.5, -0.5, 1.0, -1.0])
+        audio = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
         encoded = float_to_int16(audio)
 
         assert isinstance(encoded, bytes)
@@ -89,19 +89,20 @@ class TestFormatConversion:
 
         decoded = int16_to_float(encoded)
 
-        assert isinstance(decoded, torch.Tensor)
+        assert isinstance(decoded, np.ndarray)
+        assert decoded.dtype == np.float32
         assert len(decoded) == 5
-        assert decoded.abs().max() <= 1.0
+        assert np.abs(decoded).max() <= 1.0
 
     def test_format_roundtrip(self):
         """Test float -> int16 -> float roundtrip."""
-        original = torch.tensor([0.0, 0.5, -0.5, 0.25, -0.25])
+        original = np.array([0.0, 0.5, -0.5, 0.25, -0.25], dtype=np.float32)
 
         int16 = float_to_int16(original)
         recovered = int16_to_float(int16)
 
         # Should be approximately equal
-        assert torch.allclose(original, recovered, atol=0.001)
+        assert np.allclose(original, recovered, atol=0.001)
 
 
 class TestGain:
@@ -109,22 +110,22 @@ class TestGain:
 
     def test_apply_gain_increases_amplitude(self):
         """Test that positive gain increases amplitude."""
-        audio = torch.tensor([0.5, 0.5, 0.5])
+        audio = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         gained = apply_gain(audio, 6.0)  # +6dB = ~2x
 
-        assert gained.abs().mean() > audio.abs().mean()
+        assert np.mean(np.abs(gained)) > np.mean(np.abs(audio))
 
     def test_apply_gain_decreases_amplitude(self):
         """Test that negative gain decreases amplitude."""
-        audio = torch.tensor([0.5, 0.5, 0.5])
+        audio = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         gained = apply_gain(audio, -6.0)  # -6dB = ~0.5x
 
-        assert gained.abs().mean() < audio.abs().mean()
+        assert np.mean(np.abs(gained)) < np.mean(np.abs(audio))
 
     def test_normalize_audio(self):
         """Test audio normalization."""
-        audio = torch.tensor([0.01, 0.01, 0.01])
+        audio = np.array([0.01, 0.01, 0.01], dtype=np.float32)
         normalized = normalize_audio(audio, target_db=-20.0)
 
         # Should be scaled up (original is much quieter than -20 dBFS)
-        assert normalized.abs().mean() > audio.abs().mean()
+        assert np.mean(np.abs(normalized)) > np.mean(np.abs(audio))

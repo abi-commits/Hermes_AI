@@ -6,6 +6,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ import torch
 
 from hermes.core.exceptions import TTSGenerationError
 from hermes.services.tts.base import AbstractTTSService
+from hermes.services.tts.audio import convert_to_ulaw, resample_to_8khz
 
 logger = structlog.get_logger(__name__)
 
@@ -82,9 +84,10 @@ class ChatterboxTTSService(AbstractTTSService):
     def _load_model(self) -> None:
         """Load the Chatterbox Streaming model (called once at init)."""
         try:
-            from chatterbox.tts import ChatterboxTTS
-
-            self._model = ChatterboxTTS.from_pretrained(device=self.device)
+            tts_package = importlib.import_module("hermes.services.tts")
+            self._model = tts_package.ChatterboxTurboTTS.from_pretrained(
+                device=self.device
+            )
             self._logger.info("chatterbox_model_loaded", device=self.device)
         except Exception as exc:
             self._logger.error("chatterbox_model_load_failed", error=str(exc))
@@ -185,10 +188,41 @@ class ChatterboxTTSService(AbstractTTSService):
         embed_watermark: bool = True,
     ) -> bytes:
         """Synthesise *text* and return the complete audio in a single buffer."""
-        chunks: list[bytes] = []
-        async for chunk in self.generate_stream(text, audio_prompt_path, embed_watermark):
-            chunks.append(chunk)
-        return b"".join(chunks)
+        if self._model is None:
+            raise TTSGenerationError("Model not loaded")
+
+        prompt = str(audio_prompt_path) if audio_prompt_path else None
+        loop = asyncio.get_running_loop()
+        model = self._model
+
+        def _run_generate() -> bytes:
+            try:
+                with torch.no_grad():
+                    audio = model.generate(text, audio_prompt_path=prompt)
+
+                audio_np = audio.cpu().numpy().squeeze()
+                if audio_np.ndim == 0 or audio_np.size == 0:
+                    return b""
+
+                if embed_watermark and self._watermarker and self._model:
+                    audio_np = self._watermarker.apply_watermark(
+                        audio_np.astype(np.float32),
+                        sample_rate=self._model.sr,
+                    )
+
+                return (audio_np * 32_767).astype(np.int16).tobytes()
+            except Exception as exc:
+                raise TTSGenerationError(f"Generation error: {exc}") from exc
+
+        try:
+            if self._executor is None:
+                return _run_generate()
+            return await loop.run_in_executor(self._executor, _run_generate)
+        except TTSGenerationError:
+            raise
+        except Exception as exc:
+            self._logger.exception("tts_generate_failed", text_preview=text[:50])
+            raise TTSGenerationError(f"Generation error: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Executor management
@@ -208,3 +242,13 @@ class ChatterboxTTSService(AbstractTTSService):
         if self._model is not None:
             return self._model.sr
         return 24_000  # Chatterbox default
+
+    @staticmethod
+    def resample_to_8khz(audio_bytes: bytes, orig_sr: int) -> bytes:
+        """Compatibility wrapper for PCM resampling used by tests and call code."""
+        return resample_to_8khz(audio_bytes, orig_sr)
+
+    @staticmethod
+    def convert_to_ulaw(pcm16_bytes: bytes) -> bytes:
+        """Compatibility wrapper for Twilio mu-law conversion."""
+        return convert_to_ulaw(pcm16_bytes)

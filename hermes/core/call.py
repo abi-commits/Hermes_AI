@@ -3,13 +3,14 @@
 import asyncio
 import base64
 import json
-import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import structlog
 
 from hermes.api.metrics import MetricsCollector
+from hermes.core.adapters import ServiceAdapters
 from hermes.core.audio import decode_mulaw
 from hermes.models.call import CallState, ConversationTurn
 from hermes.services.tts.audio import convert_to_ulaw, resample_to_8khz
@@ -105,6 +106,9 @@ class Call:
         self._tasks: set[asyncio.Task] = set()
         self._running = False
 
+        # Service adapters — built in start() once services are confirmed present
+        self._adapters: ServiceAdapters | None = None
+
         self._logger = structlog.get_logger(__name__).bind(call_sid=call_sid)
 
     @property
@@ -130,39 +134,35 @@ class Call:
             self.started_at = datetime.now(UTC)
             self._running = True
 
-            # ── Lazy service creation (skipped when orchestrator injected them) ──
-            if self.stt_service is None:
-                from hermes.services.stt import STTService
-                self.stt_service = STTService()
-
-            if self.llm_service is None:
-                from config import get_settings
-                from hermes.models.llm import LLMConfig
-                from hermes.services.llm import GeminiLLMService
-                settings = get_settings()
-                self.llm_service = GeminiLLMService(
-                    api_key=settings.gemini_api_key,
-                    config=LLMConfig(
-                        model_name=settings.gemini_model,
-                        temperature=settings.gemini_temperature,
-                        max_output_tokens=settings.gemini_max_tokens,
-                    ),
+            # ── Services must be injected externally (via CallOrchestrator/ServiceBundle) ──
+            # Warn if any service is missing — tasks will be skipped gracefully.
+            missing = [
+                name for name, svc in (
+                    ("stt", self.stt_service),
+                    ("llm", self.llm_service),
+                    ("tts", self.tts_service),
+                    ("rag", self.rag_service),
+                )
+                if svc is None
+            ]
+            if missing:
+                self._logger.warning(
+                    "call_services_missing",
+                    missing=missing,
+                    hint="Inject services via CallOrchestrator and ServiceBundle",
                 )
 
-            if self.tts_service is None:
-                from hermes.services.tts import ChatterboxTTSService
-                self.tts_service = ChatterboxTTSService()
+            # Build service adapters now that services + interrupt_event are ready
+            self._adapters = ServiceAdapters.build(
+                call_sid=self.call_sid,
+                interrupt_event=self._interrupt_event,
+                stt_service=self.stt_service,
+                llm_service=self.llm_service,
+                tts_service=self.tts_service,
+                rag_service=self.rag_service,
+            )
 
-            if self.rag_service is None:
-                from hermes.services.rag import ChromaRAGService
-                self.rag_service = ChromaRAGService()
-                try:
-                    await self.rag_service.warm_up()
-                except Exception as e:
-                    self._logger.warning("rag_warm_up_failed", error=str(e))
-
-            MetricsCollector.record_call_started()
-            self._logger.info("call_started", persona=self._persona)
+            self._logger.info("adapters_built", persona=self._persona)
 
         # Record metrics
         MetricsCollector.record_call_started()
@@ -213,47 +213,41 @@ class Call:
 
     async def _stt_task(self) -> None:
         """Background task: stream audio to STT and forward transcripts to the LLM queue."""
-        if not self.stt_service:
+        if not self.stt_service or not self._adapters:
             return
 
         self._logger.info("stt_task_started")
 
-        # Queue of decoded PCM tensors fed into the Deepgram live connection.
-        tensor_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        # Queue of decoded PCM arrays fed into the Deepgram live connection.
+        pcm_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=200)
 
         async def _feed_audio() -> None:
-            """Decode µ-law frames and push PCM tensors to the tensor queue."""
+            """Decode µ-law frames and push PCM arrays to the queue."""
             while self._running:
                 try:
                     audio_bytes = await asyncio.wait_for(
                         self.audio_in_queue.get(), timeout=0.5
                     )
-                    pcm_tensor = decode_mulaw(audio_bytes)
+                    pcm_array = decode_mulaw(audio_bytes)
                     MetricsCollector.record_audio_bytes("inbound", len(audio_bytes))
-                    await tensor_queue.put(pcm_tensor)
+                    await pcm_queue.put(pcm_array)
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
+                    await pcm_queue.put(None)
                     raise
 
         feeder = asyncio.create_task(
             _feed_audio(), name=f"stt-feeder-{self.call_sid}"
         )
         try:
-            stt_start = time.perf_counter()
-            async for transcript in self.stt_service.stream_transcribe(tensor_queue):
-                if transcript.strip():
-                    MetricsCollector.record_stt_latency(
-                        time.perf_counter() - stt_start
-                    )
-                    await self.text_out_queue.put(transcript)
-                    self._logger.debug("stt_transcript", text=transcript)
-                    stt_start = time.perf_counter()
+            async for transcript in self._adapters.stt.stream_transcribe(pcm_queue):
+                await self.text_out_queue.put(transcript)
+                self._logger.debug("stt_transcript", text=transcript)
 
         except asyncio.CancelledError:
             self._logger.info("stt_task_cancelled")
         except Exception as e:
-            MetricsCollector.record_stt_error(type(e).__name__)
             self._logger.error("stt_task_error", error=str(e))
         finally:
             feeder.cancel()
@@ -261,7 +255,7 @@ class Call:
 
     async def _llm_task(self) -> None:
         """Background task: consume transcripts, retrieve RAG context, and stream LLM sentences to TTS."""
-        if not self.llm_service:
+        if not self.llm_service or not self._adapters:
             return
 
         self._logger.info("llm_task_started")
@@ -269,7 +263,7 @@ class Call:
         try:
             while self._running:
                 # Wait for user input
-                user_text = await self.text_queue.get()
+                user_text = await self.text_out_queue.get()
 
                 # Transition to processing state
                 await self._transition_to(CallState.PROCESSING)
@@ -283,18 +277,14 @@ class Call:
                 context = await self._build_context()
 
                 # Stream sentences and forward each one to TTS immediately
-                llm_start = time.perf_counter()
                 response_parts: list[str] = []
 
-                async for chunk in self.llm_service.stream_sentences(
+                async for sentence in self._adapters.llm.stream_sentences(
                     prompt=user_text, context=context
                 ):
-                    sentence = str(chunk)
                     response_parts.append(sentence)
                     # Feed each sentence to TTS as soon as it's ready
                     await self.audio_out_queue.put(sentence)
-
-                MetricsCollector.record_llm_latency(time.perf_counter() - llm_start)
 
                 # Store the full response in conversation history
                 full_response = " ".join(response_parts)
@@ -318,27 +308,23 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("llm_task_cancelled")
         except Exception as e:
-            MetricsCollector.record_llm_error(type(e).__name__)
             self._logger.error("llm_task_error", error=str(e))
 
     async def _build_context(self) -> str:
         """Assemble LLM context from RAG results and conversation history."""
         context_parts: list[str] = []
 
-        # Add RAG context if available (time-budgeted)
-        if self.rag_service and self.conversation:
+        # Add RAG context via adapter (handles timeout + errors internally)
+        if self._adapters and self.conversation:
             last_query = self.conversation[-1].content
-            try:
-                rag_results = await self.rag_service.retrieve_with_timeout(
-                    last_query,
-                    where=self.rag_metadata_filter,
-                )
-                if rag_results:
-                    context_parts.append("Relevant information:")
-                    for result in rag_results:
-                        context_parts.append(f"- {result}")
-            except Exception as e:
-                self._logger.warning("rag_context_failed", error=str(e))
+            rag_results = await self._adapters.rag.retrieve(
+                last_query,
+                where=self.rag_metadata_filter,
+            )
+            if rag_results:
+                context_parts.append("Relevant information:")
+                for result in rag_results:
+                    context_parts.append(f"- {result}")
 
         # Add conversation history
         if len(self.conversation) > 1:
@@ -350,7 +336,7 @@ class Call:
 
     async def _tts_task(self) -> None:
         """Background task: synthesise LLM sentences and stream µ-law audio to Twilio."""
-        if not self.tts_service:
+        if not self.tts_service or not self._adapters:
             return
 
         self._logger.info("tts_task_started")
@@ -364,22 +350,16 @@ class Call:
                 if self._state != CallState.SPEAKING:
                     await self._transition_to(CallState.SPEAKING)
 
-                tts_start = time.perf_counter()
-                chunk_count = 0
-
-                # Clear any pending interrupt from a previous sentence before
-                # starting synthesis for this one.
+                # Clear any pending interrupt before starting this sentence
                 self._interrupt_event.clear()
 
-                # Stream synthesis: each chunk is 16-bit PCM at model.sr (24 kHz)
-                async for chunk_bytes in self.tts_service.generate_stream(text):
-                    # Barge-in check: exit synthesis loop immediately
-                    if self._interrupt_event.is_set():
-                        self._logger.info("tts_stream_interrupted", text=text[:60])
-                        break
+                chunk_count = 0
+
+                # Stream synthesis via adapter (handles timing, interrupt, errors)
+                async for chunk_bytes in self._adapters.tts.generate_stream(text):
                     # 1. Resample 24 kHz → 8 kHz (Twilio expects 8 kHz PCMU)
                     resampled = resample_to_8khz(
-                        chunk_bytes, self.tts_service.sample_rate
+                        chunk_bytes, self._adapters.tts.sample_rate
                     )
                     # 2. Convert 16-bit PCM → 8-bit µ-law
                     mulaw_audio = convert_to_ulaw(resampled)
@@ -388,7 +368,6 @@ class Call:
                     MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
                     chunk_count += 1
 
-                MetricsCollector.record_tts_latency(time.perf_counter() - tts_start)
                 self._logger.debug(
                     "tts_audio_sent", text=text[:100], chunks=chunk_count
                 )
@@ -401,7 +380,6 @@ class Call:
         except asyncio.CancelledError:
             self._logger.info("tts_task_cancelled")
         except Exception as e:
-            MetricsCollector.record_tts_error(type(e).__name__)
             self._logger.error("tts_task_error", error=str(e))
 
     async def _send_audio(self, audio: bytes) -> None:

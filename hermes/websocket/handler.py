@@ -139,7 +139,9 @@ async def get_test_client() -> HTMLResponse:
 
             function connect() {
                 const callSid = 'test-' + Math.random().toString(36).substr(2, 9);
-                ws = new WebSocket(`ws://localhost:8000/stream/${callSid}`);
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.host;
+                ws = new WebSocket(`${protocol}//${host}/stream/${callSid}`);
 
                 ws.onopen = function() {
                     document.getElementById('status').textContent = 'Connected';

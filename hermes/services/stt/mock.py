@@ -6,12 +6,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+import numpy as np
 import structlog
 
 from hermes.services.stt.base import AbstractSTTService
-
-if TYPE_CHECKING:
-    import torch
 
 logger = structlog.get_logger(__name__)
 
@@ -39,8 +37,8 @@ class MockSTTService(AbstractSTTService):
     # Transcription
     # ------------------------------------------------------------------
 
-    async def transcribe(self, audio: "torch.Tensor") -> str:
-        """Return the next pre-set response, ignoring the audio tensor."""
+    async def transcribe(self, audio: np.ndarray) -> str:
+        """Return the next pre-set response, ignoring the audio array."""
         response = self.responses[self._index % len(self.responses)]
         self._index += 1
         self._logger.debug("mock_transcription_returned", response=response)
@@ -48,9 +46,12 @@ class MockSTTService(AbstractSTTService):
 
     async def stream_transcribe(
         self,
-        audio_queue: "asyncio.Queue[torch.Tensor]",
+        audio_queue: asyncio.Queue[np.ndarray],
     ) -> AsyncIterator[str]:
-        """Yield one pre-set response per audio tensor received from the queue."""
+        """Yield one pre-set response per audio array received from the queue."""
         while True:
-            await audio_queue.get()
+            audio = await audio_queue.get()
+            if audio is None:
+                break
             yield self.responses[self._index % len(self.responses)]
+            self._index += 1

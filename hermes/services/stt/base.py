@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import torch
+    import numpy as np
 
 
 class AbstractSTTService(ABC):
@@ -31,12 +31,12 @@ class AbstractSTTService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def transcribe(self, audio: "torch.Tensor") -> str:
-        """Transcribe a complete PCM float32 audio tensor (non-streaming)."""
+    async def transcribe(self, audio: "np.ndarray") -> str:
+        """Transcribe a complete PCM float32 audio array (non-streaming)."""
 
     @abstractmethod
-    async def stream_transcribe(
+    def stream_transcribe(
         self,
-        audio_queue: "asyncio.Queue[torch.Tensor]",
+        audio_queue: "asyncio.Queue[np.ndarray]",
     ) -> AsyncIterator[str]:
         """Yield transcript fragments in real-time from a live audio queue."""
