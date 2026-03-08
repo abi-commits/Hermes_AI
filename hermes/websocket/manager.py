@@ -9,57 +9,36 @@ from fastapi import WebSocket
 from hermes.core.call import Call
 
 if TYPE_CHECKING:
-    from hermes.core.orchestrator import CallConfig, CallOrchestrator, ServiceBundle
-    from hermes.websocket.schemas import MediaMessage, StartMessage
-
-logger = structlog.get_logger(__name__)
+    from hermes.core.orchestrator import CallConfig, CallOrchestrator
+    from hermes.websocket.schemas import StartMessage
 
 
 class ConnectionManager:
-    """Manages active WebSocket connections and routes Twilio media frames to calls."""
+    """Registry of active media stream connections."""
 
-    def __init__(self, bundle: "ServiceBundle | None" = None) -> None:
-        """Initialise the connection manager.
-
-        Args:
-            bundle: Optional service bundle for standalone mode (no orchestrator).
-                    When an orchestrator is attached via ``set_orchestrator``, the
-                    bundle is ignored — the orchestrator owns service injection.
-        """
-        # call_sid → Call  (always maintained for fast lookups)
+    def __init__(self) -> None:
         self._active_calls: dict[str, Call] = {}
-        # stream_sid → call_sid  (fast audio routing)
-        self._stream_to_call: dict[str, str] = {}
-        self._lock = asyncio.Lock()
-        self._orchestrator: "CallOrchestrator | None" = None
-        self._bundle: "ServiceBundle | None" = bundle
+        self._stream_map: dict[str, str] = {}  # stream_sid -> call_sid
+        self._orchestrator: CallOrchestrator | None = None
         self._logger = structlog.get_logger(__name__)
 
-    # ------------------------------------------------------------------
-    # Orchestrator integration
-    # ------------------------------------------------------------------
-
     def set_orchestrator(self, orchestrator: "CallOrchestrator") -> None:
-        """Attach a ``CallOrchestrator``; must be called before any calls are handled."""
+        """Attach the call orchestrator for lifecycle management."""
         self._orchestrator = orchestrator
-        self._logger.info("orchestrator_attached")
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def connect(
         self,
         websocket: WebSocket,
-        start_message: "StartMessage",
+        start_msg: "StartMessage",
         config: "CallConfig | None" = None,
     ) -> Call:
-        """Handle a new Twilio WebSocket connection and start the call."""
-        call_sid = start_message.start.call_sid
-        stream_sid = start_message.start.stream_sid
-        account_sid = start_message.start.account_sid
+        """Register a new active call and media stream."""
+        call_sid = start_msg.start.call_sid
+        stream_sid = start_msg.start.stream_sid
+        account_sid = start_msg.start.account_sid
 
-        if self._orchestrator is not None:
+        # If we have an orchestrator, use it to manage the call lifecycle
+        if self._orchestrator:
             call = await self._orchestrator.create_call(
                 websocket=websocket,
                 call_sid=call_sid,
@@ -68,153 +47,73 @@ class ConnectionManager:
                 config=config,
             )
         else:
-            # Standalone mode (no orchestrator) — create call and inject services
-            # from the ServiceBundle so the service boundary is preserved.
-            if self._bundle is None:
-                self._logger.warning(
-                    "standalone_no_service_bundle",
-                    hint="Pass a ServiceBundle to ConnectionManager for standalone use",
-                )
-            stt = self._bundle.stt_factory() if self._bundle else None
-            async with self._lock:
-                call = Call(
-                    call_sid=call_sid,
-                    stream_sid=stream_sid,
-                    websocket=websocket,
-                    account_sid=account_sid,
-                    stt_service=stt,
-                    llm_service=self._bundle.llm_service if self._bundle else None,
-                    tts_service=self._bundle.tts_service if self._bundle else None,
-                    rag_service=self._bundle.rag_service if self._bundle else None,
-                )
-                self._active_calls[call_sid] = call
-            await call.start()
+            # Fallback for standalone/test usage
+            call = Call(
+                call_sid=call_sid,
+                stream_sid=stream_sid,
+                websocket=websocket,
+                account_sid=account_sid,
+                persona=config.persona if config else "default",
+            )
+            # Standalone mode must still respect the greeting
+            await call.start(greeting=config.greeting if config else None)
 
-        async with self._lock:
-            # Always register the stream→call mapping for audio routing
-            self._stream_to_call[stream_sid] = call_sid
-            # When an orchestrator is active it is the single source of truth for
-            # active-call state; do NOT mirror into ConnectionManager._active_calls
-            # to avoid the two dicts diverging under error conditions.
+        self._active_calls[call_sid] = call
+        self._stream_map[stream_sid] = call_sid
 
         self._logger.info(
-            "call_connected",
+            "websocket_connected",
             call_sid=call_sid,
             stream_sid=stream_sid,
-            active_calls=self.active_calls,
+            total_active=len(self._active_calls),
         )
         return call
 
     async def disconnect(self, stream_sid: str) -> None:
-        """Stop the call associated with *stream_sid* and clean up routing entries."""
-        standalone_call: Call | None = None
-        async with self._lock:
-            call_sid = self._stream_to_call.pop(stream_sid, None)
-            if call_sid:
-                # Capture the call object before removing it so we can stop it
-                # in standalone mode (orchestrator handles its own teardown).
-                standalone_call = self._active_calls.pop(call_sid, None)
-
-        if call_sid is None:
-            self._logger.debug("disconnect_unknown_stream", stream_sid=stream_sid)
+        """Unregister a stream and signal the orchestrator to terminate the call."""
+        call_sid = self._stream_map.pop(stream_sid, None)
+        if not call_sid:
             return
 
-        if self._orchestrator is not None:
-            await self._orchestrator.terminate_call(call_sid, reason="hangup")
-        elif standalone_call is not None:
-            # Standalone mode — stop the call directly; there is no orchestrator
-            # to do it, so we must call stop() to cancel background tasks cleanly.
-            try:
-                await standalone_call.stop()
-            except Exception as exc:
-                self._logger.warning(
-                    "standalone_call_stop_error", call_sid=call_sid, error=str(exc)
-                )
+        call = self._active_calls.pop(call_sid, None)
+        if not call:
+            return
+
+        # If orchestrated, the orchestrator handles the stop() call
+        if self._orchestrator:
+            await self._orchestrator.terminate_call(call_sid, reason="disconnect")
+        else:
+            await call.stop(status="completed")
 
         self._logger.info(
-            "call_disconnected",
+            "websocket_disconnected",
             call_sid=call_sid,
             stream_sid=stream_sid,
-            active_calls=self.active_calls,
+            total_active=len(self._active_calls),
         )
 
-    # ------------------------------------------------------------------
-    # Media routing
-    # ------------------------------------------------------------------
-
     async def handle_media(self, message: "MediaMessage") -> None:
-        """Route an incoming Twilio audio frame to the correct call."""
-        stream_sid = message.stream_sid
-        call_sid = self._stream_to_call.get(stream_sid)
-
+        """Route an inbound media chunk to the correct call processor."""
+        call_sid = self._stream_map.get(message.stream_sid)
         if not call_sid:
-            self._logger.warning(
-                "media_received_for_unknown_stream", stream_sid=stream_sid
-            )
             return
 
-        # Use get_call() so that, when an orchestrator is present, we always read
-        # from its registry (the single source of truth) rather than a stale
-        # local mirror.
-        call = self.get_call(call_sid)
-        if not call:
-            self._logger.warning(
-                "media_received_for_unknown_call",
-                call_sid=call_sid,
-                stream_sid=stream_sid,
-            )
-            return
-
-        await call.process_audio_chunk(message.media.payload)
-
-    # ------------------------------------------------------------------
-    # Lookups
-    # ------------------------------------------------------------------
+        call = self._active_calls.get(call_sid)
+        if call:
+            await call.process_audio_chunk(message.media.payload)
 
     def get_call(self, call_sid: str) -> Call | None:
-        """Return the active ``Call`` for *call_sid*, or ``None``."""
-        if self._orchestrator is not None:
-            return self._orchestrator.get_call(call_sid)
+        """Return the active call for *call_sid*."""
         return self._active_calls.get(call_sid)
 
-    def get_call_by_stream(self, stream_sid: str) -> Call | None:
-        """Return the active ``Call`` for *stream_sid*, or ``None``."""
-        call_sid = self._stream_to_call.get(stream_sid)
-        return self.get_call(call_sid) if call_sid else None
-
-    @property
-    def active_calls(self) -> int:
-        """Number of currently active calls."""
-        if self._orchestrator is not None:
-            return self._orchestrator.active_call_count
-        return len(self._active_calls)
-
-    @property
-    def active_calls_list(self) -> list[str]:
-        """List of active call SIDs."""
-        if self._orchestrator is not None:
-            return list(self._orchestrator.active_calls.keys())
-        return list(self._active_calls.keys())
-
-    async def broadcast_metrics(self) -> None:
-        """Log a structured snapshot of all active calls (for monitoring)."""
-        if self._orchestrator is not None:
-            calls_data = self._orchestrator.active_calls
-        else:
-            calls_data = self._active_calls
-
+    def get_stats(self) -> dict:
+        """Return basic connection statistics."""
         metrics = {
-            "active_calls": len(calls_data),
-            "calls": [
-                {
-                    "call_sid": call.call_sid,
-                    "duration_seconds": round(call.duration_seconds, 1),
-                    "state": call.state.name,
-                }
-                for call in calls_data.values()
-            ],
+            "active_calls": len(self._active_calls),
+            "stream_mappings": len(self._stream_map),
         }
-        self._logger.debug("active_calls_metrics", **metrics)
+        self._logger.debug("connection_stats", **metrics)
+        return metrics
 
 
 # Module-level singleton — shared by main.py, api/calls.py, and the WebSocket handler.

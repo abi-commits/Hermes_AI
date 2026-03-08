@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections.abc import AsyncIterator
 from typing import Callable
@@ -20,6 +21,7 @@ from tenacity import (
 
 from hermes.models.llm import (
     ConversationTurn,
+    FillerMarker,
     InterruptMarker,
     LLMConfig,
     LLMGenerationError,
@@ -35,8 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Regex that splits on sentence-ending punctuation while avoiding false
 # positives on common abbreviations (Mr., Dr., U.S., e.g., 3.14 …).
-# Python requires fixed-width lookbehinds, so each abbreviation is listed
-# separately instead of using alternation.
 _SENTENCE_END_RE = re.compile(
     r"""
     (?<!\bMr)    # Mr.
@@ -53,6 +53,10 @@ _SENTENCE_END_RE = re.compile(
     re.VERBOSE,
 )
 
+_SOFT_FRAGMENT_MIN_CHARS = 80
+_HARD_FRAGMENT_MIN_CHARS = 140
+_EARLY_BREAK_MARKERS = (",", ";", ":", "\n")
+
 
 # ---------------------------------------------------------------------------
 # Service
@@ -67,9 +71,9 @@ class GeminiLLMService(AbstractLLMService):
         api_key: str | None = None,
         config: LLMConfig | None = None,
         system_instruction: str | None = None,
-        tools: list[Callable] | None = None,
         prompt_manager: PromptManager | None = None,
         prompt_name: str = "default",
+        filler_phrases: list[str] | None = None,
     ) -> None:
         """Initialise the Gemini LLM service.
 
@@ -77,13 +81,13 @@ class GeminiLLMService(AbstractLLMService):
             api_key: Gemini API key (uses GOOGLE_API_KEY env var if not provided).
             config: Generation parameters for the LLM.
             system_instruction: Explicit system instruction (overrides prompt_manager).
-            tools: List of Gemini function-calling tools.
             prompt_manager: PromptManager instance to load system prompts from.
             prompt_name: Name of the system prompt to load (default: "default").
+            filler_phrases: Phrases used to bridge silence during long RAG retrievals.
         """
         self.config = config or LLMConfig()
         self.prompt_manager = prompt_manager
-        self.tools = tools
+        self.filler_phrases = filler_phrases or []
 
         # Load system instruction from PromptManager if available and not explicitly set
         if system_instruction:
@@ -107,7 +111,7 @@ class GeminiLLMService(AbstractLLMService):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _make_generate_config(self) -> types.GenerateContentConfig:
+    def _make_generate_config(self, tools: list[Callable] | None = None) -> types.GenerateContentConfig:
         """Build a ``GenerateContentConfig`` from current settings."""
         cfg = types.GenerateContentConfig(
             temperature=self.config.temperature,
@@ -116,8 +120,10 @@ class GeminiLLMService(AbstractLLMService):
             top_k=self.config.top_k,
             system_instruction=self.system_instruction,
         )
-        if self.tools:
-            cfg.tools = self._convert_tools(self.tools)
+        if tools:
+            # We don't populate a shared _tool_map here anymore to avoid race conditions.
+            # stream_sentences handles its own local tool mapping.
+            cfg.tools = self._convert_tools_to_declarations(tools)
         return cfg
 
     def _build_prompt(
@@ -142,8 +148,8 @@ class GeminiLLMService(AbstractLLMService):
         parts.append(f"User: {query}\nAssistant:")
         return "\n".join(parts)
 
-    def _convert_tools(self, tools: list[Callable]) -> list[types.Tool]:
-        """Convert ``create_function_tool``-decorated callables to Gemini tool objects."""
+    def _convert_tools_to_declarations(self, tools: list[Callable]) -> list[types.Tool]:
+        """Convert ``create_function_tool``-decorated callables to Gemini tool declarations."""
         declarations = []
         for tool in tools:
             if hasattr(tool, "function_declaration"):
@@ -152,6 +158,27 @@ class GeminiLLMService(AbstractLLMService):
                 logger.warning("Tool %s missing function_declaration attribute", tool.__name__)
 
         return [types.Tool(function_declarations=declarations)] if declarations else []
+
+    @staticmethod
+    def _pop_ready_fragment(buffer: str) -> tuple[str | None, str]:
+        """Return the next TTS-ready fragment from *buffer*, if any."""
+        sentence_match = _SENTENCE_END_RE.search(buffer)
+        if sentence_match:
+            end = sentence_match.end()
+            return buffer[:end].strip(), buffer[end:].lstrip()
+
+        if len(buffer) >= _SOFT_FRAGMENT_MIN_CHARS:
+            split_at = max(buffer.rfind(marker) for marker in _EARLY_BREAK_MARKERS)
+            if split_at >= 40:
+                end = split_at + 1
+                return buffer[:end].strip(), buffer[end:].lstrip()
+
+        if len(buffer) >= _HARD_FRAGMENT_MIN_CHARS:
+            split_at = buffer.rfind(" ")
+            if split_at > 0:
+                return buffer[:split_at].strip(), buffer[split_at + 1 :].lstrip()
+
+        return None, buffer
 
     # ------------------------------------------------------------------
     # Unary generation
@@ -170,7 +197,7 @@ class GeminiLLMService(AbstractLLMService):
         conversation_history: list[ConversationTurn] | None = None,
         call_sid: str | None = None,
     ) -> str:
-        """Generate a complete response (non-streaming); retried up to 3× on error."""
+        """Generate a complete response (non-streaming)."""
         full_prompt = self._build_prompt(prompt, context, conversation_history)
         cfg = self._make_generate_config()
 
@@ -194,6 +221,18 @@ class GeminiLLMService(AbstractLLMService):
             logger.error("Gemini generation error (call=%s): %s", call_sid, exc)
             raise LLMGenerationError(f"Gemini API error: {exc}") from exc
 
+    def _convert_history(self, history: list[ConversationTurn] | None) -> list[types.Content]:
+        """Convert Hermes history to Gemini content objects."""
+        if not history:
+            return []
+        return [
+            types.Content(
+                role="user" if turn.role == "user" else "model",
+                parts=[types.Part(text=turn.content)],
+            )
+            for turn in history
+        ]
+
     # ------------------------------------------------------------------
     # Streaming generation (sentence-level)
     # ------------------------------------------------------------------
@@ -205,37 +244,90 @@ class GeminiLLMService(AbstractLLMService):
         conversation_history: list[ConversationTurn] | None = None,
         call_sid: str | None = None,
         interruption_check: Callable[[], bool] | None = None,
-    ) -> AsyncIterator[str | InterruptMarker]:
+        tools: list[Callable] | None = None,
+    ) -> AsyncIterator[str | InterruptMarker | FillerMarker]:
         """Stream the response sentence-by-sentence with barge-in support."""
-        full_prompt = self._build_prompt(prompt, context, conversation_history)
-        cfg = self._make_generate_config()
+        cfg = self._make_generate_config(tools=tools)
+        
+        # Local tool map to avoid cross-call race conditions
+        local_tool_map = {}
+        if tools:
+            for tool in tools:
+                if hasattr(tool, "function_declaration"):
+                    local_tool_map[tool.function_declaration.name] = tool
 
         try:
             buffer = ""
+            history = self._convert_history(conversation_history)
+            
+            if not tools:
+                # No tools: standard prompt flow
+                full_prompt = self._build_prompt(prompt, context, conversation_history)
+                chat = self.client.aio.chats.create(model=self.config.model_name, config=cfg)
+                message = full_prompt
+            else:
+                # Tool mode: separate history and context
+                if context:
+                    history.append(types.Content(role="user", parts=[types.Part(text=f"Context information:\n{context}")]))
+                    history.append(types.Content(role="model", parts=[types.Part(text="Understood.")]))
+                
+                chat = self.client.aio.chats.create(model=self.config.model_name, config=cfg, history=history)
+                message = prompt
 
-            async for chunk in await self.client.aio.models.generate_content_stream(
-                model=self.config.model_name,
-                contents=full_prompt,
-                config=cfg,
-            ):
-                if interruption_check and interruption_check():
-                    logger.info("Barge-in detected (call=%s)", call_sid)
-                    yield InterruptMarker()
-                    return
+            response_iter = await chat.send_message_stream(message)
+            filler_sent = False
+            
+            while True:
+                found_tool_calls = False
+                
+                async for chunk in response_iter:
+                    if interruption_check and interruption_check():
+                        yield InterruptMarker()
+                        return
 
-                if chunk.text:
-                    buffer += chunk.text
+                    # Detect tool calls (function_calls field in GenerateContentResponse)
+                    if chunk.candidates and chunk.candidates[0].content.parts:
+                        f_calls = [p.function_call for p in chunk.candidates[0].content.parts if p.function_call]
+                        if f_calls:
+                            found_tool_calls = True
+                            if not filler_sent and self.filler_phrases:
+                                filler = random.choice(self.filler_phrases)
+                                yield FillerMarker(filler)
+                                filler_sent = True
 
-                    while True:
-                        match = _SENTENCE_END_RE.search(buffer)
-                        if not match:
+                            # Execute tools in parallel
+                            tasks = []
+                            for fc in f_calls:
+                                tool_func = local_tool_map.get(fc.name)
+                                if tool_func:
+                                    tasks.append(tool_func(**fc.args))
+                            
+                            if tasks:
+                                results = await asyncio.gather(*tasks)
+                                tool_responses = []
+                                for i, fc in enumerate(f_calls):
+                                    tool_responses.append(
+                                        types.Part(
+                                            function_response=types.FunctionResponse(
+                                                name=fc.name,
+                                                response={"result": results[i]},
+                                            )
+                                        )
+                                    )
+                                response_iter = await chat.send_message_stream(tool_responses)
                             break
-                        sentence = buffer[: match.end()].strip()
-                        buffer = buffer[match.end() :]
-                        if sentence:
-                            yield sentence
 
-            # Yield any leftover text that didn't end with punctuation
+                    if chunk.text:
+                        buffer += chunk.text
+                        while True:
+                            fragment, buffer = self._pop_ready_fragment(buffer)
+                            if not fragment:
+                                break
+                            yield fragment
+
+                if not found_tool_calls:
+                    break
+
             if buffer.strip():
                 yield buffer.strip()
 

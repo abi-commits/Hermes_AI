@@ -1,37 +1,46 @@
-"""Audio processing utilities (NumPy-based with Soxr)."""
+"""Audio processing utilities (NumPy-based with Soxr and G.711 PCMU support)."""
 
 from __future__ import annotations
 
 import math
+
 import numpy as np
 import soxr
 
+try:
+    import audioop
+except ImportError:  # pragma: no cover - covered indirectly in environments without audioop
+    audioop = None
+
+
+def _require_audioop():
+    """Return the available audioop module or raise a clear runtime error."""
+    if audioop is None:
+        raise RuntimeError(
+            "G.711 mu-law support requires 'audioop'. "
+            "Install 'audioop-lts' on Python 3.13+ environments."
+        )
+    return audioop
+
+
+def pcm16_bytes_to_mulaw(data: bytes) -> bytes:
+    """Encode 16-bit PCM bytes to G.711 PCMU bytes."""
+    return _require_audioop().lin2ulaw(data, 2)
+
+
+def mulaw_bytes_to_pcm16(data: bytes) -> bytes:
+    """Decode G.711 PCMU bytes into 16-bit PCM bytes."""
+    return _require_audioop().ulaw2lin(data, 2)
+
 
 def encode_mulaw(audio: np.ndarray) -> bytes:
-    """Encode float PCM [-1.0, 1.0] to μ-law bytes using NumPy."""
-    # Clip to avoid log of zero or negative
-    mu = 255
-    audio = np.clip(audio, -1.0, 1.0)
-    magnitude = np.log1p(mu * np.abs(audio)) / np.log1p(mu)
-    encoded = np.sign(audio) * magnitude
-    
-    # Map from [-1, 1] to [0, 255]
-    # This is a simplified linear mapping; for production telephony, 
-    # audioop.lin2ulaw or a lookup table is more standard, 
-    # but this satisfies the requirement without audioop.
-    quantized = ((1.0 - encoded) * 127.5).astype(np.uint8)
-    return quantized.tobytes()
+    """Encode float PCM [-1.0, 1.0] to G.711 PCMU bytes."""
+    return pcm16_bytes_to_mulaw(float_to_int16(audio))
 
 
 def decode_mulaw(data: bytes) -> np.ndarray:
-    """Decode μ-law bytes to float PCM [-1.0, 1.0] using NumPy."""
-    mu = 255
-    quantized = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
-    
-    # Inverse mapping
-    encoded = 1.0 - (quantized / 127.5)
-    audio = np.sign(encoded) * (1.0 / mu) * ((1.0 + mu) ** np.abs(encoded) - 1.0)
-    return audio.astype(np.float32)
+    """Decode G.711 PCMU bytes to float PCM [-1.0, 1.0]."""
+    return int16_to_float(mulaw_bytes_to_pcm16(data))
 
 
 def resample_audio(audio: np.ndarray, orig_freq: int, new_freq: int) -> np.ndarray:

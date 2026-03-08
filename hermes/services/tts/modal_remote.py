@@ -99,7 +99,7 @@ class ModalRemoteTTSService(AbstractTTSService):
         effective_chunk_size = chunk_size if chunk_size is not None else self._default_chunk_size
 
         try:
-            remote_stream = instance.generate_stream.remote_gen(
+            remote_stream = instance.generate_stream.remote_gen.aio(
                 text=text,
                 audio_prompt_path=prompt,
                 embed_watermark=embed_watermark
@@ -129,7 +129,7 @@ class ModalRemoteTTSService(AbstractTTSService):
         prompt = str(audio_prompt_path) if audio_prompt_path else None
 
         try:
-            result = instance.generate.remote(
+            result = await instance.generate.remote.aio(
                 text=text,
                 audio_prompt_path=prompt,
                 embed_watermark=embed_watermark
@@ -149,6 +149,17 @@ class ModalRemoteTTSService(AbstractTTSService):
     def set_executor(self, executor: ThreadPoolExecutor) -> None:
         """No-op hook to satisfy the Hermes TTS service interface."""
         self._executor = executor
+
+    async def ping(self) -> bool:
+        """Ping the remote worker to verify it is responsive."""
+        try:
+            instance = await self._get_remote_instance()
+            # Making a fast, lightweight remote call
+            await self._maybe_await(instance.get_sample_rate.remote.aio())
+            return True
+        except Exception as exc:
+            self._logger.warning("modal_remote_tts_ping_failed", error=str(exc))
+            return False
 
     @property
     def sample_rate(self) -> int:

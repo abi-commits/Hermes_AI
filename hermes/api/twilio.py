@@ -1,4 +1,6 @@
-"""Twilio webhook endpoints for inbound calls."""
+"""Twilio webhook endpoints for inbound calls and status updates."""
+
+from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, Form, HTTPException, Request, status
@@ -8,7 +10,7 @@ from config import get_settings
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(tags=["twilio"])
+router = APIRouter(prefix="/twilio", tags=["Telephony"])
 
 
 def _build_stream_twiml(stream_url: str) -> str:
@@ -23,7 +25,7 @@ def _build_stream_twiml(stream_url: str) -> str:
     )
 
 
-def _validate_twilio_signature(request: Request, settings) -> bool:
+async def _validate_twilio_signature(request: Request, settings) -> bool:
     """Validate the Twilio request signature; returns ``True`` in dev mode (no auth token set)."""
     if not settings.twilio_auth_token:
         logger.warning("twilio_auth_token_not_set_skipping_validation")
@@ -34,9 +36,22 @@ def _validate_twilio_signature(request: Request, settings) -> bool:
 
         validator = RequestValidator(settings.twilio_auth_token)
         signature = request.headers.get("X-Twilio-Signature", "")
-        url = str(request.url)
-        # POST params must be sorted for validation
-        params = dict(request.query_params)
+        
+        # Reconstruct the original requested URL to match Twilio's signature.
+        # This is critical when running behind a proxy like ngrok.
+        scheme = request.headers.get("X-Forwarded-Proto", request.url.scheme)
+        host = request.headers.get("X-Forwarded-Host") or request.url.netloc
+        
+        # Include query string if present
+        query_string = request.url.query
+        path = request.url.path
+        url = f"{scheme}://{host}{path}"
+        if query_string:
+            url += f"?{query_string}"
+        
+        # POST params must be sorted for validation, read form data
+        form = await request.form()
+        params = dict(form)
         return validator.validate(url, params, signature)
     except Exception as exc:
         logger.error("twilio_signature_validation_error", error=str(exc))
@@ -44,12 +59,12 @@ def _validate_twilio_signature(request: Request, settings) -> bool:
 
 
 @router.post(
-    "/twilio/voice",
+    "/voice",
     response_class=Response,
-    summary="Twilio inbound call webhook",
+    summary="Voice Entrypoint",
     description=(
-        "Twilio POSTs here when an inbound call arrives. "
-        "Returns TwiML that connects the call to the Hermes WebSocket media stream."
+        "Primary webhook called by Twilio when an inbound call arrives. "
+        "Instructs Twilio to open a WebSocket media stream to Hermes."
     ),
 )
 async def twilio_voice_webhook(
@@ -65,7 +80,8 @@ async def twilio_voice_webhook(
 
     # --- Signature validation (production guard) ---
     if settings.is_production:
-        if not _validate_twilio_signature(request, settings):
+        is_valid = await _validate_twilio_signature(request, settings)
+        if not is_valid:
             logger.warning(
                 "twilio_invalid_signature",
                 call_sid=CallSid,
@@ -88,8 +104,10 @@ async def twilio_voice_webhook(
     # Build the WebSocket URL from the incoming request host so this works
     # behind any proxy / ngrok tunnel without needing a hard-coded PUBLIC_URL.
     host = request.headers.get("X-Forwarded-Host") or request.url.hostname
-    # Twilio always streams over wss://.
-    stream_url = f"wss://{host}/stream/{CallSid}"
+    
+    # Twilio always streams over wss:// in production, use protocol matching for dev
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    stream_url = f"{scheme}://{host}/stream/{CallSid}"
 
     twiml = _build_stream_twiml(stream_url)
 
@@ -103,18 +121,17 @@ async def twilio_voice_webhook(
 
 
 @router.post(
-    "/twilio/status",
+    "/status",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Twilio call status callback",
-    description="Receives call status updates from Twilio (ringing, in-progress, completed, etc.).",
+    summary="Status Callback",
+    description="Asynchronous hook receiving call lifecycle updates from Twilio (ringing, answered, etc.).",
 )
 async def twilio_status_callback(
-    request: Request,
     CallSid: str = Form(...),
     CallStatus: str = Form(...),
     From: str = Form(default=""),
     To: str = Form(default=""),
-    CallDuration: str = Form(default=""),
+    CallDuration: str | None = Form(default=None),
 ) -> None:
     """Log Twilio call status updates."""
     logger.info(
@@ -123,5 +140,5 @@ async def twilio_status_callback(
         status=CallStatus,
         from_=From,
         to=To,
-        duration_s=CallDuration or None,
+        duration_s=CallDuration,
     )

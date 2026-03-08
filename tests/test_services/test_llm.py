@@ -39,7 +39,7 @@ class TestMockGeminiLLMService:
         service = MockGeminiLLMService(responses=["Hello world"])
 
         chunks = []
-        async for chunk in service.stream_sentences(prompt="query"):
+        async for chunk in service.stream_sentences(prompt="query", conversation_history=[]):
             chunks.append(chunk)
 
         assert len(chunks) > 0
@@ -50,7 +50,7 @@ class TestMockGeminiLLMService:
         """Test that no InterruptMarker appears without an interruption check."""
         service = MockGeminiLLMService(responses=["Quick reply"])
 
-        async for chunk in service.stream_sentences(prompt="q"):
+        async for chunk in service.stream_sentences(prompt="q", conversation_history=[]):
             assert not isinstance(chunk, InterruptMarker)
 
     @pytest.mark.asyncio
@@ -68,7 +68,9 @@ class TestMockGeminiLLMService:
 
         chunks = []
         async for chunk in service.stream_sentences(
-            prompt="query", interruption_check=interruption_check
+            prompt="query", 
+            conversation_history=[],
+            interruption_check=interruption_check
         ):
             chunks.append(chunk)
             if isinstance(chunk, InterruptMarker):
@@ -142,3 +144,36 @@ class TestBuildPrompt:
         result = service._build_prompt("go on", None, history)
         assert "[INTERRUPTED]" in result
 
+
+class TestStreamingChunking:
+    """Tests for low-latency streaming chunk extraction."""
+
+    def test_pop_ready_fragment_prefers_complete_sentences(self):
+        """Sentence-ending punctuation should flush immediately."""
+        fragment, remainder = GeminiLLMService._pop_ready_fragment(
+            "Thanks for calling. Let me check that for you"
+        )
+
+        assert fragment == "Thanks for calling."
+        assert remainder == "Let me check that for you"
+
+    def test_pop_ready_fragment_flushes_long_clauses(self):
+        """Long comma-delimited clauses should flush before sentence end."""
+        fragment, remainder = GeminiLLMService._pop_ready_fragment(
+            "Let me pull up your account details and confirm the latest payment, "
+            "then I can walk you through the next step"
+        )
+
+        assert fragment == "Let me pull up your account details and confirm the latest payment,"
+        assert remainder == "then I can walk you through the next step"
+
+    def test_pop_ready_fragment_hard_flushes_long_unpunctuated_buffers(self):
+        """Very long streams without punctuation should still flush on whitespace."""
+        fragment, remainder = GeminiLLMService._pop_ready_fragment(
+            "this response keeps streaming without punctuation so we should still hand off "
+            "a meaningful fragment to tts before the model finally decides to stop"
+        )
+
+        assert fragment is not None
+        assert len(fragment) >= 80
+        assert remainder

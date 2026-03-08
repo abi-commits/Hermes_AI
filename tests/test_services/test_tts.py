@@ -130,9 +130,9 @@ class TestResampleAndUlaw:
 
     def test_convert_to_ulaw(self):
         """Produce 1 byte per sample."""
-        pcm = np.zeros(100, dtype=np.int16).tobytes()  # 200 bytes
+        pcm = np.array([0, 1000, -1000], dtype=np.int16).tobytes()
         ulaw = ChatterboxTTSService.convert_to_ulaw(pcm)
-        assert len(ulaw) == 100  # 1 byte per sample
+        assert ulaw == bytes([0xFF, 0xCE, 0x4E])
 
 
 class TestTTSWorkerPool:

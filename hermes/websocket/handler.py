@@ -6,6 +6,8 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
+from config import get_settings
+from hermes.core.orchestrator import CallConfig
 from hermes.websocket.manager import ConnectionManager
 from hermes.websocket.schemas import (
     ConnectedMessage,
@@ -68,8 +70,10 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                     await websocket.close(code=4001, reason="Call SID mismatch")
                     return
 
-                # Create call instance
-                call = await manager.connect(websocket, start_msg)
+                # Create call instance with default greeting from settings
+                settings = get_settings()
+                config = CallConfig(greeting=settings.llm_greeting)
+                call = await manager.connect(websocket, start_msg, config=config)
 
             elif event_type == "media":
                 # Media event - process audio

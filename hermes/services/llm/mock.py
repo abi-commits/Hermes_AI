@@ -85,13 +85,14 @@ class MockGeminiLLMService(AbstractLLMService):
     # Streaming generation
     # ------------------------------------------------------------------
 
-    async def stream_sentences(  # type: ignore[override]
+    async def stream_sentences(
         self,
         prompt: str,
         context: str | None = None,
         conversation_history: list[ConversationTurn] | None = None,
         call_sid: str | None = None,
         interruption_check: Callable[[], bool] | None = None,
+        tools: list[Callable] | None = None,
     ) -> AsyncIterator[str | InterruptMarker]:
         """Yield the next pre-set response word-by-word to simulate streaming."""
         response = self._responses[self._index % len(self._responses)]

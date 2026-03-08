@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -44,6 +44,7 @@ class CallConfig:
     """Per-call configuration options."""
 
     persona: str = "default"
+    greeting: str | None = None
     rag_metadata_filter: dict[str, Any] | None = None
     max_history: int = 20
     fallback_phrase: str = "I'm sorry, I had a problem. Could you repeat that?"
@@ -124,7 +125,7 @@ class CallOrchestrator:
             self._active_calls[call_sid] = call
 
         try:
-            await call.start()
+            await call.start(greeting=cfg.greeting)
         except Exception as exc:
             async with self._lock:
                 self._active_calls.pop(call_sid, None)
@@ -172,8 +173,10 @@ class CallOrchestrator:
             self._logger.debug("terminate_call_not_found", call_sid=call_sid)
             return
 
+        status = "failed" if reason == "error" else "completed"
+
         try:
-            await call.stop()
+            await call.stop(status=status)
         except Exception as exc:
             self._logger.warning(
                 "call_stop_error", call_sid=call_sid, error=str(exc)
@@ -227,9 +230,9 @@ class CallOrchestrator:
         call_sid: str,
         error: Exception,
         *,
-        attempt_recovery: bool = True,
+        attempt_recovery: bool = False,
     ) -> None:
-        """Log an unrecoverable call error and optionally queue a TTS fallback phrase."""
+        """Log an unrecoverable call error and terminate the affected call."""
         call = self.get_call(call_sid)
         if call is None:
             return
@@ -243,14 +246,13 @@ class CallOrchestrator:
         await self._hooks.on_error(call_sid, error)
 
         if attempt_recovery and call._running:  # noqa: SLF001
-            try:
-                fallback = call._fallback_phrase  # noqa: SLF001
-                await asyncio.wait_for(
-                    call.audio_out_queue.put(fallback),
-                    timeout=1.0,
-                )
-            except (asyncio.TimeoutError, Exception):
-                pass
+            self._logger.info(
+                "call_error_recovery_skipped",
+                call_sid=call_sid,
+                reason="background_task_failure_requires_termination",
+            )
+
+        await self.terminate_call(call_sid, reason="error")
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -279,6 +281,7 @@ class CallOrchestrator:
             llm_service=self._bundle.llm_service,
             tts_service=self._bundle.tts_service,
             rag_service=self._bundle.rag_service,
+            task_error_handler=self.handle_call_error,
             persona=config.persona,
             rag_metadata_filter=config.rag_metadata_filter,
             max_history=config.max_history,

@@ -28,6 +28,16 @@ class InterruptMarker:
     pass
 
 
+class FillerMarker:
+    """Sentinel yielded by the LLM stream to indicate a filler phrase."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
 # ======================================================================
 # Data classes
 # ======================================================================

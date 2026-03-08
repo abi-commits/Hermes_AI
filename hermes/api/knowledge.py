@@ -1,4 +1,6 @@
-"""Knowledge base (RAG) management endpoints."""
+"""API endpoints for managing the RAG knowledge base."""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -8,112 +10,55 @@ from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
 
 
 # ---------------------------------------------------------------------------
-# Request / response models
+# Models
 # ---------------------------------------------------------------------------
 
 
-class AddDocumentsRequest(BaseModel):
-    """Request body for adding documents."""
+class DocumentIngestRequest(BaseModel):
+    """Request to add new documents to the knowledge base."""
 
-    texts: list[str] = Field(
-        ...,
-        min_length=1,
-        description="List of raw text documents to add.",
-    )
-    ids: list[str] | None = Field(
-        default=None,
-        description=(
-            "Optional list of unique document IDs. "
-            "Auto-generated from content hash when omitted."
-        ),
-    )
-    metadatas: list[dict[str, Any]] | None = Field(
-        default=None,
-        description="Optional list of metadata dicts, one per document.",
-    )
-    split: bool = Field(
-        default=True,
-        description=(
-            "When True (default), documents are split into chunks before "
-            "being stored.  Set to False to store each text as a single chunk."
-        ),
-    )
-    chunk_size: int | None = Field(
-        default=None,
-        ge=50,
-        description="Override the default chunk size (tokens or chars depending on settings).",
-    )
-    chunk_overlap: int | None = Field(
-        default=None,
-        ge=0,
-        description="Override the default chunk overlap.",
-    )
+    texts: list[str] = Field(..., min_items=1, example=["Hermes is a voice AI."])
+    ids: list[str] | None = Field(None, example=["doc_1"])
+    metadatas: list[dict[str, Any]] | None = Field(None, example=[{"source": "wiki"}])
 
 
-class AddDocumentsResponse(BaseModel):
-    """Response after adding documents."""
+class DocumentIngestResponse(BaseModel):
+    """Response after ingesting documents."""
 
-    added: int
+    count: int
     ids: list[str]
 
 
-class DeleteDocumentsRequest(BaseModel):
-    """Request body for deleting documents."""
+class DocumentDeleteRequest(BaseModel):
+    """Request to remove documents from the knowledge base."""
 
-    ids: list[str] = Field(..., min_length=1, description="IDs of documents to delete.")
-
-
-class DeleteDocumentsResponse(BaseModel):
-    """Response after deleting documents."""
-
-    deleted: int
-    ids: list[str]
-
-
-class KnowledgeStatsResponse(BaseModel):
-    """Collection statistics."""
-
-    collection: str
-    document_count: int
+    ids: list[str] = Field(..., min_items=1, example=["doc_1"])
 
 
 class QueryRequest(BaseModel):
-    """Request body for testing retrieval."""
+    """Request to test retrieval from the knowledge base."""
 
-    query: str = Field(..., min_length=1, description="Query text.")
-    k: int = Field(default=5, ge=1, le=20, description="Number of results to return.")
-    where: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional Chroma metadata filter.",
-    )
+    query: str = Field(..., example="What is Hermes?")
+    k: int = Field(5, ge=1, le=20)
+
+
+class QueryResultSchema(BaseModel):
+    """A single retrieved document chunk."""
+
+    content: str
+    metadata: dict[str, Any] | None = None
 
 
 class QueryResponse(BaseModel):
-    """Response for a knowledge base query."""
+    """Response containing retrieved chunks."""
 
     query: str
-    results: list[str]
+    results: list[QueryResultSchema]
     count: int
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_rag(request: Request):
-    """Return the RAG service from app state, or raise 503 if not initialised."""
-    rag = getattr(request.app.state, "rag_service", None)
-    if rag is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="RAG service is not initialised",
-        )
-    return rag
 
 
 # ---------------------------------------------------------------------------
@@ -123,115 +68,92 @@ def _get_rag(request: Request):
 
 @router.get(
     "/stats",
-    response_model=KnowledgeStatsResponse,
-    summary="Knowledge base statistics",
-    description="Returns the document count and collection name for the active Chroma collection.",
+    summary="Get Collection Stats",
+    description="Returns metadata and document counts for the vector database collection.",
 )
-async def get_stats(request: Request) -> KnowledgeStatsResponse:
-    """Return basic collection statistics."""
-    rag = _get_rag(request)
+async def get_stats(request: Request) -> dict[str, Any]:
+    """Fetch statistics from the active RAG service."""
+    rag = request.app.state.rag_service
     try:
-        stats = await rag.get_collection_stats()
+        return await rag.get_collection_stats()
     except Exception as exc:
-        logger.error("knowledge_stats_error", error=str(exc))
+        logger.error("rag_stats_failed", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not reach vector database: {exc}",
+            detail=f"Failed to fetch vector DB stats: {exc}",
         )
-    return KnowledgeStatsResponse(
-        collection=stats["name"],
-        document_count=stats["count"],
-    )
 
 
 @router.post(
     "/documents",
-    response_model=AddDocumentsResponse,
+    response_model=DocumentIngestResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Add documents",
-    description=(
-        "Add one or more text documents to the knowledge base. "
-        "Documents are chunked (with optional metadata) and stored in Chroma."
-    ),
+    summary="Ingest Documents",
+    description="Adds text documents to the vector store for RAG retrieval.",
 )
-async def add_documents(
-    request: Request,
-    body: AddDocumentsRequest,
-) -> AddDocumentsResponse:
-    """Ingest documents; splits into chunks when ``split=True`` (default)."""
-    rag = _get_rag(request)
+async def ingest_documents(
+    body: DocumentIngestRequest, request: Request
+) -> DocumentIngestResponse:
+    """Ingest documents into ChromaDB."""
+    rag = request.app.state.rag_service
     try:
-        if body.split:
-            added_ids = await rag.split_and_add_documents(
-                texts=body.texts,
-                metadatas=body.metadatas,
-                chunk_size=body.chunk_size,
-                chunk_overlap=body.chunk_overlap,
-            )
-        else:
-            added_ids = await rag.add_documents(
-                texts=body.texts,
-                ids=body.ids,
-                metadatas=body.metadatas,
-            )
-    except Exception as exc:
-        logger.error("knowledge_add_error", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to add documents: {exc}",
+        doc_ids = await rag.add_documents(
+            texts=body.texts,
+            ids=body.ids,
+            metadatas=body.metadatas,
         )
-
-    logger.info("knowledge_documents_added", count=len(added_ids))
-    return AddDocumentsResponse(added=len(added_ids), ids=added_ids)
+        return DocumentIngestResponse(count=len(doc_ids), ids=doc_ids)
+    except Exception as exc:
+        logger.error("rag_ingest_failed", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ingestion failed: {exc}",
+        )
 
 
 @router.delete(
     "/documents",
-    response_model=DeleteDocumentsResponse,
-    summary="Delete documents",
-    description="Remove documents from the knowledge base by their IDs.",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Documents",
+    description="Removes documents from the vector store by their IDs.",
 )
 async def delete_documents(
-    request: Request,
-    body: DeleteDocumentsRequest,
-) -> DeleteDocumentsResponse:
-    """Delete documents from the vector database by ID."""
-    rag = _get_rag(request)
+    body: DocumentDeleteRequest, request: Request
+) -> None:
+    """Delete specific documents from ChromaDB."""
+    rag = request.app.state.rag_service
     try:
         await rag.delete_documents(ids=body.ids)
     except Exception as exc:
-        logger.error("knowledge_delete_error", error=str(exc))
+        logger.error("rag_delete_failed", error=str(exc))
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to delete documents: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Deletion failed: {exc}",
         )
-
-    logger.info("knowledge_documents_deleted", count=len(body.ids))
-    return DeleteDocumentsResponse(deleted=len(body.ids), ids=body.ids)
 
 
 @router.post(
     "/query",
     response_model=QueryResponse,
-    summary="Query knowledge base",
-    description=(
-        "Test retrieval from the knowledge base. "
-        "Returns the top-k most relevant document chunks for the given query."
-    ),
+    summary="Test Retrieval",
+    description="Utility endpoint to test what chunks the RAG system returns for a given query.",
 )
-async def query_knowledge(
-    request: Request,
-    body: QueryRequest,
+async def query_knowledge_base(
+    body: QueryRequest, request: Request
 ) -> QueryResponse:
-    """Run a retrieval query for debugging RAG quality."""
-    rag = _get_rag(request)
+    """Perform a direct retrieval search."""
+    rag = request.app.state.rag_service
     try:
-        results = await rag.retrieve(query=body.query, k=body.k, where=body.where)
+        results = await rag.retrieve(body.query, k=body.k)
+        
+        return QueryResponse(
+            query=body.query,
+            results=[QueryResultSchema(content=r) for r in results],
+            count=len(results)
+        )
     except Exception as exc:
-        logger.error("knowledge_query_error", error=str(exc))
+        logger.error("rag_query_failed", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Retrieval failed: {exc}",
         )
-
-    return QueryResponse(query=body.query, results=results, count=len(results))

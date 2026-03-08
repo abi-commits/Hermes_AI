@@ -12,7 +12,7 @@ from prometheus_client import (
     generate_latest,
 )
 
-router = APIRouter(tags=["metrics"])
+router = APIRouter(tags=["System"])
 
 # Application info
 APP_INFO = Info("hermes_info", "Hermes application information")

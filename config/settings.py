@@ -72,6 +72,16 @@ class Settings(BaseSettings):
         default="en-US",
         description="Language code for transcription",
     )
+    deepgram_utterance_end_ms: int = Field(
+        default=700,
+        ge=0,
+        description="Milliseconds of silence before Deepgram finalizes a spoken turn",
+    )
+    deepgram_finalize_grace_ms: int = Field(
+        default=250,
+        ge=0,
+        description="Extra milliseconds to wait for trailing Deepgram final events after finalize",
+    )
 
     # ==========================================================================
     # LLM (Gemini)
@@ -94,6 +104,19 @@ class Settings(BaseSettings):
         default=1024,
         ge=1,
         description="Maximum tokens to generate",
+    )
+    llm_greeting: str = Field(
+        default="Hello! How can I help you today?",
+        description="Initial greeting sent to the caller upon connection.",
+    )
+    llm_filler_phrases: list[str] = Field(
+        default=[
+            "One moment while I look that up for you...",
+            "Let me check my records on that...",
+            "Just a second, I'm finding that information...",
+            "I'll pull up the details for you, one moment...",
+        ],
+        description="Phrases used to bridge silence during long RAG retrievals.",
     )
 
     # ==========================================================================

@@ -36,8 +36,10 @@ class AbstractLLMService(ABC):
         self,
         prompt: str,
         context: str | None = None,
-        conversation_history: "list[ConversationTurn] | None" = None,
+        conversation_history: list["ConversationTurn"] | None = None,
         call_sid: str | None = None,
         interruption_check: "Callable[[], bool] | None" = None,
+        tools: list["Callable"] | None = None,
     ) -> "AsyncIterator[str | InterruptMarker]":
         """Stream the response sentence-by-sentence with optional barge-in support."""
+

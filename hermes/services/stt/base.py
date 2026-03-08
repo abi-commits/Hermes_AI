@@ -38,5 +38,7 @@ class AbstractSTTService(ABC):
     def stream_transcribe(
         self,
         audio_queue: "asyncio.Queue[np.ndarray]",
-    ) -> AsyncIterator[str]:
-        """Yield transcript fragments in real-time from a live audio queue."""
+    ) -> AsyncIterator[str | InterruptMarker]:
+        """Yield transcript fragments or InterruptMarkers in real-time."""
+...
+from hermes.models.llm import InterruptMarker

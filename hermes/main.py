@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from hermes import __version__
-from hermes.api import calls_router, health_router, knowledge_router, metrics_router, twilio_router
+from hermes.api import calls_router, health_router, knowledge_router, metrics_router, tts_router, twilio_router
 from hermes.api.metrics import APP_INFO, MetricsCollector
 from hermes.websocket.manager import connection_manager
 
@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
             ),
             prompt_manager=prompt_manager,
             prompt_name=getattr(settings, "llm_prompt_name", "default"),
+            filler_phrases=settings.llm_filler_phrases,
         )
         logger.info("llm_service_initialized", model=settings.gemini_model)
 
@@ -198,6 +199,7 @@ def create_app() -> FastAPI:
     app.include_router(twilio_router, tags=["twilio"])
     app.include_router(calls_router, tags=["calls"])
     app.include_router(knowledge_router, tags=["knowledge"])
+    app.include_router(tts_router, tags=["tts"])
     app.include_router(websocket_router, prefix="/stream", tags=["websocket"])
 
     return app

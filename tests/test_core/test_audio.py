@@ -30,6 +30,20 @@ class TestMuLawCodec:
         assert len(decoded) == len(original)
         assert np.abs(decoded).max() <= 1.0
 
+    def test_encode_silence_matches_g711_pcmu(self):
+        """Digital silence should encode to 0xFF in G.711 PCMU."""
+        audio = np.zeros(4, dtype=np.float32)
+
+        assert encode_mulaw(audio) == b"\xff\xff\xff\xff"
+
+    def test_decode_known_pcmu_levels(self):
+        """Known PCMU bytes should decode to the expected signed levels."""
+        decoded = decode_mulaw(bytes([0xFF, 0xFE, 0x7E]))
+
+        assert decoded[0] == pytest.approx(0.0, abs=1e-6)
+        assert decoded[1] == pytest.approx(8 / 32768.0, abs=1e-6)
+        assert decoded[2] == pytest.approx(-8 / 32768.0, abs=1e-6)
+
     def test_encode_returns_bytes(self):
         """Test that encoding returns bytes."""
         audio = np.zeros(100, dtype=np.float32)

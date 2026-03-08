@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from hermes.api.metrics import MetricsCollector
+from hermes.models.llm import FillerMarker, InterruptMarker
 
 if TYPE_CHECKING:
     from hermes.services.llm.base import AbstractLLMService
@@ -89,22 +90,27 @@ class STTAdapter(_AdapterBase):
     async def stream_transcribe(
         self,
         tensor_queue: asyncio.Queue,
-    ) -> AsyncGenerator[str, None]:
-        """Stream transcripts, recording per-transcript latency.
+    ) -> AsyncGenerator[str | InterruptMarker, None]:
+        """Stream transcripts or InterruptMarkers, recording per-transcript latency.
 
         Stops yielding immediately when the interrupt event is set.
         """
         segment_start = time.perf_counter()
         try:
-            async for transcript in self._service.stream_transcribe(tensor_queue):
+            async for item in self._service.stream_transcribe(tensor_queue):
                 if self.interrupted:
                     self._logger.debug("stt_interrupted")
                     return
-                if transcript.strip():
+                
+                if isinstance(item, InterruptMarker):
+                    yield item
+                    continue
+
+                if item.strip():
                     MetricsCollector.record_stt_latency(
                         time.perf_counter() - segment_start
                     )
-                    yield transcript
+                    yield item
                     segment_start = time.perf_counter()
         except asyncio.CancelledError:
             raise
@@ -136,23 +142,33 @@ class LLMAdapter(_AdapterBase):
         self,
         prompt: str,
         context: str | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream LLM sentences, stopping on interrupt.
+        conversation_history: list[ConversationTurn] | None = None,
+        tools: list[Callable] | None = None,
+    ) -> AsyncGenerator[str | FillerMarker | InterruptMarker, None]:
+        """Stream LLM sentences or markers, stopping on interrupt.
 
         Latency is recorded as total time from first call to last sentence.
         """
         t0 = time.perf_counter()
         sentences_yielded = 0
         try:
-            async for chunk in self._service.stream_sentences(
+            async for item in self._service.stream_sentences(
                 prompt=prompt,
                 context=context,
+                conversation_history=conversation_history,
                 call_sid=self._call_sid,
+                interruption_check=lambda: self.interrupted,
+                tools=tools,
             ):
                 if self.interrupted:
                     self._logger.debug("llm_interrupted", sentences=sentences_yielded)
                     return
-                sentence = str(chunk)
+                
+                if isinstance(item, (FillerMarker, InterruptMarker)):
+                    yield item
+                    continue
+
+                sentence = str(item)
                 sentences_yielded += 1
                 yield sentence
         except asyncio.CancelledError:

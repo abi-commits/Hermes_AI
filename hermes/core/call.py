@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ from hermes.api.metrics import MetricsCollector
 from hermes.core.adapters import ServiceAdapters
 from hermes.core.audio import decode_mulaw
 from hermes.models.call import CallState, ConversationTurn
+from hermes.models.llm import FillerMarker, InterruptMarker
 from hermes.services.tts.audio import convert_to_ulaw, resample_to_8khz
 
 if TYPE_CHECKING:
@@ -58,6 +60,7 @@ class Call:
         llm_service: "AbstractLLMService | None" = None,
         tts_service: "AbstractTTSService | None" = None,
         rag_service: "AbstractRAGService | None" = None,
+        task_error_handler: "Callable[[str, Exception], Awaitable[None]] | None" = None,
         # --- Per-call configuration ---
         persona: str = "default",
         rag_metadata_filter: dict[str, Any] | None = None,
@@ -73,6 +76,7 @@ class Call:
         # State
         self._state = CallState.IDLE
         self._state_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
 
         # Timing
         self.started_at: datetime | None = None
@@ -97,6 +101,7 @@ class Call:
         self._persona = persona
         self.rag_metadata_filter: dict[str, Any] | None = rag_metadata_filter
         self._fallback_phrase = fallback_phrase
+        self._task_error_handler = task_error_handler
 
         # Barge-in / interrupt signal
         #   Set by interrupt() → checked by _tts_task between chunks
@@ -105,6 +110,7 @@ class Call:
         # Background tasks
         self._tasks: set[asyncio.Task] = set()
         self._running = False
+        self._background_failure_reported = False
 
         # Service adapters — built in start() once services are confirmed present
         self._adapters: ServiceAdapters | None = None
@@ -124,8 +130,10 @@ class Call:
         end = self.ended_at or datetime.now(UTC)
         return (end - self.started_at).total_seconds()
 
-    async def start(self) -> None:
+    async def start(self, greeting: str | None = None) -> None:
         """Start the call, initialise services lazily if not injected, and begin background tasks."""
+        from config import get_settings
+
         async with self._state_lock:
             if self._state != CallState.IDLE:
                 raise RuntimeError(f"Cannot start call from state {self._state}")
@@ -153,6 +161,7 @@ class Call:
                 )
 
             # Build service adapters now that services + interrupt_event are ready
+            settings = get_settings()
             self._adapters = ServiceAdapters.build(
                 call_sid=self.call_sid,
                 interrupt_event=self._interrupt_event,
@@ -160,6 +169,7 @@ class Call:
                 llm_service=self.llm_service,
                 tts_service=self.tts_service,
                 rag_service=self.rag_service,
+                rag_timeout_s=settings.rag_query_timeout_s,
             )
 
             self._logger.info("adapters_built", persona=self._persona)
@@ -168,8 +178,15 @@ class Call:
         MetricsCollector.record_call_started()
         MetricsCollector.record_websocket_connected()
 
-        # Start background processing tasks
+        # Start background processing tasks BEFORE sending greeting
+        # This ensures we are listening for barge-in even during the initial greeting.
         self._start_tasks()
+
+        # Optional initial greeting
+        if greeting:
+            await self.audio_out_queue.put(greeting)
+            self.conversation.append(ConversationTurn(role="assistant", content=greeting))
+            self._logger.info("initial_greeting_sent", text=greeting)
 
         # Transition to listening state
         await self._transition_to(CallState.LISTENING)
@@ -182,8 +199,58 @@ class Call:
             asyncio.create_task(self._tts_task(), name=f"tts-{self.call_sid}"),
         ]
         for task in tasks:
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._register_task(task)
+
+    def _register_task(self, task: asyncio.Task) -> None:
+        """Track a background task and supervise unexpected failures."""
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._handle_task_completion)
+
+    def _handle_task_completion(self, task: asyncio.Task) -> None:
+        """Report unexpected task failures back into the call supervision path."""
+        if task.cancelled() or not self._running or self._background_failure_reported:
+            return
+
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+
+        if error is None:
+            return
+
+        self._background_failure_reported = True
+        asyncio.create_task(
+            self._handle_background_task_failure(task.get_name(), error),
+            name=f"call-failure-{self.call_sid}",
+        )
+
+    async def _handle_background_task_failure(
+        self,
+        task_name: str,
+        error: Exception,
+    ) -> None:
+        """Terminate the call cleanly when a supervised background task crashes."""
+        self._logger.error(
+            "background_task_failed",
+            task_name=task_name,
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+
+        if self._task_error_handler is not None:
+            try:
+                await self._task_error_handler(self.call_sid, error)
+                return
+            except Exception as handler_exc:
+                self._logger.error(
+                    "background_task_failure_handler_failed",
+                    task_name=task_name,
+                    error=str(handler_exc),
+                )
+
+        await self.stop(status="failed")
 
     async def _transition_to(self, new_state: CallState) -> None:
         """Transition to *new_state* and log the change."""
@@ -241,14 +308,20 @@ class Call:
             _feed_audio(), name=f"stt-feeder-{self.call_sid}"
         )
         try:
-            async for transcript in self._adapters.stt.stream_transcribe(pcm_queue):
-                await self.text_out_queue.put(transcript)
-                self._logger.debug("stt_transcript", text=transcript)
+            async for item in self._adapters.stt.stream_transcribe(pcm_queue):
+                if isinstance(item, InterruptMarker):
+                    # Immediate barge-in on speech detection
+                    await self.interrupt()
+                    continue
+
+                await self.text_out_queue.put(item)
+                self._logger.debug("stt_transcript", text=item)
 
         except asyncio.CancelledError:
             self._logger.info("stt_task_cancelled")
         except Exception as e:
             self._logger.error("stt_task_error", error=str(e))
+            raise
         finally:
             feeder.cancel()
             await asyncio.gather(feeder, return_exceptions=True)
@@ -273,23 +346,47 @@ class Call:
                     ConversationTurn(role="user", content=user_text)
                 )
 
-                # Build context (RAG + history) with a time budget
-                context = await self._build_context()
-
                 # Stream sentences and forward each one to TTS immediately
+                # (Agentic RAG handles retrieval via tools inside stream_sentences)
                 response_parts: list[str] = []
+                turn_interrupted = False
 
-                async for sentence in self._adapters.llm.stream_sentences(
-                    prompt=user_text, context=context
+                # Create per-call RAG tool bound to this call's adapter and metadata filter
+                from hermes.services.llm.rag_tool import get_rag_tool
+                rag_tool = get_rag_tool(
+                    rag_adapter=self._adapters.rag,
+                    metadata_filter=self.rag_metadata_filter,
+                )
+
+                async for item in self._adapters.llm.stream_sentences(
+                    prompt=user_text,
+                    context=None,
+                    conversation_history=self.conversation[:-1],
+                    tools=[rag_tool],
                 ):
+                    if isinstance(item, InterruptMarker):
+                        self._logger.info("llm_turn_interrupted")
+                        turn_interrupted = True
+                        break
+
+                    if isinstance(item, FillerMarker):
+                        # Play filler speech but don't add to history
+                        await self.audio_out_queue.put(str(item))
+                        continue
+
+                    sentence = str(item)
                     response_parts.append(sentence)
                     # Feed each sentence to TTS as soon as it's ready
                     await self.audio_out_queue.put(sentence)
 
-                # Store the full response in conversation history
+                # Store the response in conversation history
                 full_response = " ".join(response_parts)
                 self.conversation.append(
-                    ConversationTurn(role="assistant", content=full_response)
+                    ConversationTurn(
+                        role="assistant",
+                        content=full_response,
+                        interrupted=turn_interrupted,
+                    )
                 )
 
                 # Trim history if needed
@@ -300,6 +397,7 @@ class Call:
                     "llm_response_generated",
                     response=full_response[:100],
                     sentences=len(response_parts),
+                    interrupted=turn_interrupted,
                 )
 
                 # Transition back to listening
@@ -309,6 +407,7 @@ class Call:
             self._logger.info("llm_task_cancelled")
         except Exception as e:
             self._logger.error("llm_task_error", error=str(e))
+            raise
 
     async def _build_context(self) -> str:
         """Assemble LLM context from RAG results and conversation history."""
@@ -381,6 +480,7 @@ class Call:
             self._logger.info("tts_task_cancelled")
         except Exception as e:
             self._logger.error("tts_task_error", error=str(e))
+            raise
 
     async def _send_audio(self, audio: bytes) -> None:
         """Base64-encode *audio* and send it to Twilio as a media event."""
@@ -395,6 +495,7 @@ class Call:
             await self.websocket.send_text(json.dumps(message))
         except Exception as e:
             self._logger.error("audio_send_error", error=str(e))
+            raise
 
     async def _send_twilio_clear(self) -> None:
         """Send a Twilio ``clear`` event to flush buffered audio mid-utterance."""
@@ -521,7 +622,7 @@ class Call:
             return
 
         # 4. Stop the local AI pipeline — Twilio now owns the call
-        await self.stop()
+        await self.stop(status="transferred")
 
     async def _repeat_last_message(self) -> None:
         """Repeat the last assistant message."""
@@ -530,29 +631,38 @@ class Call:
                 await self.audio_out_queue.put(turn.content)
                 break
 
-    async def stop(self) -> None:
+    async def stop(self, status: str = "completed") -> None:
         """Cancel background tasks and transition to ENDED state."""
-        await self._transition_to(CallState.DISCONNECTING)
-        self._running = False
+        async with self._stop_lock:
+            if self._state == CallState.ENDED:
+                return
+            if self._state == CallState.DISCONNECTING:
+                return
 
-        # Cancel all background tasks
-        for task in self._tasks:
-            task.cancel()
+            await self._transition_to(CallState.DISCONNECTING)
+            self._running = False
 
-        # Wait for tasks to complete
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            current_task = asyncio.current_task()
+            tasks_to_cancel = [task for task in self._tasks if task is not current_task]
 
-        self.ended_at = datetime.now(UTC)
-        await self._transition_to(CallState.ENDED)
+            for task in tasks_to_cancel:
+                task.cancel()
 
-        MetricsCollector.record_call_ended(
-            status="completed",
-            duration=self.duration_seconds,
-        )
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
-        self._logger.info(
-            "call_ended",
-            duration_seconds=self.duration_seconds,
-            total_turns=len(self.conversation),
-        )
+            self.ended_at = datetime.now(UTC)
+            await self._transition_to(CallState.ENDED)
+
+            MetricsCollector.record_call_ended(
+                status=status,
+                duration=self.duration_seconds,
+            )
+            MetricsCollector.record_websocket_disconnected()
+
+            self._logger.info(
+                "call_ended",
+                status=status,
+                duration_seconds=self.duration_seconds,
+                total_turns=len(self.conversation),
+            )
