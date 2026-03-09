@@ -184,9 +184,10 @@ class Call:
 
         # Optional initial greeting
         if greeting:
+            self._logger.info("queuing_initial_greeting", text=greeting)
             await self.audio_out_queue.put(greeting)
             self.conversation.append(ConversationTurn(role="assistant", content=greeting))
-            self._logger.info("initial_greeting_sent", text=greeting)
+            self._logger.info("initial_greeting_queued", text=greeting)
 
         # Transition to listening state
         await self._transition_to(CallState.LISTENING)
@@ -436,14 +437,17 @@ class Call:
     async def _tts_task(self) -> None:
         """Background task: synthesise LLM sentences and stream µ-law audio to Twilio."""
         if not self.tts_service or not self._adapters:
+            self._logger.warning("tts_task_skipped_no_service_or_adapters", has_service=bool(self.tts_service), has_adapters=bool(self._adapters))
             return
 
-        self._logger.info("tts_task_started")
+        self._logger.info("tts_task_started", sample_rate=self._adapters.tts.sample_rate)
 
         try:
             while self._running:
                 # Wait for a sentence to synthesize
+                self._logger.debug("tts_task_waiting_for_text")
                 text = await self.audio_out_queue.get()
+                self._logger.info("tts_task_processing_text", text=text[:60], text_len=len(text))
 
                 # Transition to speaking state (idempotent if already SPEAKING)
                 if self._state != CallState.SPEAKING:
@@ -455,19 +459,26 @@ class Call:
                 chunk_count = 0
 
                 # Stream synthesis via adapter (handles timing, interrupt, errors)
-                async for chunk_bytes in self._adapters.tts.generate_stream(text):
-                    # 1. Resample 24 kHz → 8 kHz (Twilio expects 8 kHz PCMU)
-                    resampled = resample_to_8khz(
-                        chunk_bytes, self._adapters.tts.sample_rate
-                    )
-                    # 2. Convert 16-bit PCM → 8-bit µ-law
-                    mulaw_audio = convert_to_ulaw(resampled)
-                    # 3. Send frame immediately
-                    await self._send_audio(mulaw_audio)
-                    MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
-                    chunk_count += 1
+                self._logger.debug("tts_generating_stream", text=text[:60])
+                try:
+                    async for chunk_bytes in self._adapters.tts.generate_stream(text):
+                        # 1. Resample 24 kHz → 8 kHz (Twilio expects 8 kHz PCMU)
+                        resampled = resample_to_8khz(
+                            chunk_bytes, self._adapters.tts.sample_rate
+                        )
+                        # 2. Convert 16-bit PCM → 8-bit µ-law
+                        mulaw_audio = convert_to_ulaw(resampled)
+                        # 3. Send frame immediately
+                        await self._send_audio(mulaw_audio)
+                        MetricsCollector.record_audio_bytes("outbound", len(mulaw_audio))
+                        chunk_count += 1
+                        if chunk_count <= 3:
+                            self._logger.debug("tts_chunk_sent", idx=chunk_count, pcm_len=len(chunk_bytes), resampled_len=len(resampled), mulaw_len=len(mulaw_audio))
+                except Exception as gen_exc:
+                    self._logger.error("tts_stream_generation_failed", error=str(gen_exc), error_type=type(gen_exc).__name__)
+                    raise
 
-                self._logger.debug(
+                self._logger.info(
                     "tts_audio_sent", text=text[:100], chunks=chunk_count
                 )
 

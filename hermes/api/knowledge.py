@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
+router = APIRouter(prefix="/knowledge")
 
 
 # ---------------------------------------------------------------------------

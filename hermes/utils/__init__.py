@@ -1,5 +1,5 @@
-"""Utility functions for Hermes."""
+"""Hermes utility modules."""
 
-from hermes.utils.logging import JSONFormatter, configure_logging
+from hermes.utils.logging import configure_logging
 
-__all__ = ["JSONFormatter", "configure_logging"]
+__all__ = ["configure_logging"]

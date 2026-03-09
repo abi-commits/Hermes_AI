@@ -1,5 +1,6 @@
 """FastAPI application factory and lifespan management."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -9,8 +10,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from hermes import __version__
-from hermes.api import calls_router, health_router, knowledge_router, metrics_router, tts_router, twilio_router
+from hermes.api import (
+    calls_router,
+    health_router,
+    knowledge_router,
+    metrics_router,
+    tts_router,
+    twilio_router,
+)
 from hermes.api.metrics import APP_INFO, MetricsCollector
+from hermes.utils.logging import configure_logging
 from hermes.websocket.manager import connection_manager
 
 logger = structlog.get_logger(__name__)
@@ -20,6 +29,7 @@ def build_tts_service(settings):
     """Create the configured TTS service implementation."""
     if settings.tts_provider == "modal_remote":
         from hermes.services.tts import ModalRemoteTTSService
+
         service = ModalRemoteTTSService(
             app_name=settings.modal_tts_app_name,
             class_name=settings.modal_tts_class_name,
@@ -37,6 +47,7 @@ def build_tts_service(settings):
 
     # Local chatterbox requires torch/torchaudio
     from hermes.services.tts import ChatterboxTTSService
+
     service = ChatterboxTTSService(
         device=settings.chatterbox_device,
         watermark_key=(
@@ -54,34 +65,15 @@ def build_tts_service(settings):
     return service
 
 
-def setup_logging() -> None:
-    """Configure structured logging with JSON output in production."""
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer()
-            if get_settings().is_production
-            else structlog.dev.ConsoleRenderer(),
-        ],
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise and shut down all application services."""
     settings = get_settings()
     settings.validate_production_requirements()
+
+    # Configure unified structured logging
+    configure_logging(environment=settings.app_env, log_level=settings.log_level)
+
     logger.info(
         "startup",
         app_name=settings.app_name,
@@ -100,122 +92,110 @@ async def lifespan(app: FastAPI):
         from hermes.services.rag import ChromaRAGService
         from hermes.services.stt import DeepgramSTTService
 
-        # 1. RAG — warm up eagerly so the first call pays no cold-start cost
-        app.state.rag_service = ChromaRAGService()
-        try:
-            await app.state.rag_service.warm_up()
-            logger.info("rag_service_initialized")
-        except Exception as rag_exc:
-            logger.warning("rag_warm_up_failed", error=str(rag_exc))
-
-        # 2. TTS — Chatterbox with dedicated thread pool
-        tts_executor = ThreadPoolExecutor(
-            max_workers=settings.chatterbox_num_workers,
-            thread_name_prefix="tts-worker",
+        # 1. Thread Pool
+        executor = ThreadPoolExecutor(
+            max_workers=settings.thread_pool_workers, thread_name_prefix="hermes-worker"
         )
-        app.state.tts_executor = tts_executor
-        app.state.tts_service = build_tts_service(settings)
-        app.state.tts_service.set_executor(tts_executor)
-        logger.info("tts_service_initialized", provider=settings.tts_provider)
+        app.state.executor = executor
 
-        # 3. LLM — shared Gemini instance with prompt management (stateless per-request)
-        prompt_manager = PromptManager()
-        app.state.llm_service = GeminiLLMService(
+        # 2. Prompts
+        prompt_manager = PromptManager(
+            system_prompts_dir=settings.prompt_dir_system,
+            few_shot_dir=settings.prompt_dir_few_shot,
+        )
+
+        # 3. RAG Service
+        rag_service = ChromaRAGService(
+            persist_directory=settings.chroma_persist_dir,
+            collection_name=settings.chroma_collection_name,
+        )
+        # ── FIX: Warm up in background to avoid blocking lifespan ──
+        if not settings.debug:
+            asyncio.create_task(rag_service.warm_up(), name="rag-warmup")
+            logger.info("rag_warm_up_task_started")
+
+        # 4. LLM Service
+        llm_config = LLMConfig(
+            model=settings.gemini_model,
+            temperature=settings.gemini_temperature,
+            max_output_tokens=settings.gemini_max_tokens,
+        )
+        llm_service = GeminiLLMService(
             api_key=settings.gemini_api_key,
-            config=LLMConfig(
-                model_name=settings.gemini_model,
-                temperature=settings.gemini_temperature,
-                max_output_tokens=settings.gemini_max_tokens,
-            ),
+            config=llm_config,
             prompt_manager=prompt_manager,
-            prompt_name=getattr(settings, "llm_prompt_name", "default"),
-            filler_phrases=settings.llm_filler_phrases,
         )
-        logger.info("llm_service_initialized", model=settings.gemini_model)
 
-        # 4. Build the service bundle and orchestrator
+        # 5. TTS Service
+        tts_service = build_tts_service(settings)
+        tts_service.set_executor(executor)
+
+        # 6. Call Orchestrator
         bundle = ServiceBundle(
-            stt_factory=DeepgramSTTService,
-            llm_service=app.state.llm_service,
-            tts_service=app.state.tts_service,
-            rag_service=app.state.rag_service,
+            stt_factory=lambda: DeepgramSTTService(),
+            llm_service=llm_service,
+            tts_service=tts_service,
+            rag_service=rag_service,
         )
-        app.state.orchestrator = CallOrchestrator(bundle)
-        connection_manager.set_orchestrator(app.state.orchestrator)
-        app.state.connection_manager = connection_manager
-        logger.info("orchestrator_initialized")
+        orchestrator = CallOrchestrator(bundle)
+        app.state.orchestrator = orchestrator
 
-        # Update Prometheus app info
-        APP_INFO.info({"version": __version__, "name": settings.app_name})
+        # Attach orchestrator to connection manager for WebSocket routing
+        connection_manager.set_orchestrator(orchestrator)
+        app.state.connection_manager = connection_manager
+
+        # Set app info for metrics
+        APP_INFO.info(
+            {
+                "version": __version__,
+                "environment": settings.app_env,
+                "tts_provider": settings.tts_provider,
+            }
+        )
 
         yield
 
-    except Exception as e:
-        logger.error("startup_failed", error=str(e))
-        raise
-
     finally:
-        # Shutdown: gracefully terminate active calls, then release resources
-        logger.info("shutdown")
-
+        # Shutdown
+        logger.info("shutdown_starting")
         if hasattr(app.state, "orchestrator"):
             await app.state.orchestrator.shutdown()
-            logger.info("orchestrator_shutdown")
-
-        if hasattr(app.state, "tts_executor"):
-            app.state.tts_executor.shutdown(wait=False)
-            logger.info("tts_executor_shutdown")
+        if hasattr(app.state, "executor"):
+            app.state.executor.shutdown(wait=True)
+        logger.info("shutdown_complete")
 
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
-    settings = get_settings()
-    setup_logging()
-
     app = FastAPI(
-        title=settings.app_name,
+        title="Hermes AI",
+        description="Low-latency voice AI orchestration platform.",
         version=__version__,
-        description="AI-powered voice support service",
-        debug=settings.debug,
         lifespan=lifespan,
     )
 
-    # Import router here to ensure it uses the lightweight websocket_router
-    from hermes.websocket.handler import websocket_router
-
-    # CORS middleware — restrict origins in production
-    allowed_origins = ["*"] if settings.is_development else [f"https://{settings.host}"]
+    # Middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins,
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Include routers
-    app.include_router(health_router, tags=["health"])
-    app.include_router(metrics_router, prefix="/metrics", tags=["metrics"])
-    app.include_router(twilio_router, tags=["twilio"])
-    app.include_router(calls_router, tags=["calls"])
-    app.include_router(knowledge_router, tags=["knowledge"])
-    app.include_router(tts_router, tags=["tts"])
-    app.include_router(websocket_router, prefix="/stream", tags=["websocket"])
+    # Include routers (tags are defined internally in each router)
+    from hermes.websocket.handler import websocket_router
+
+    app.include_router(health_router)
+    app.include_router(metrics_router)
+    app.include_router(twilio_router)
+    app.include_router(calls_router)
+    app.include_router(knowledge_router)
+    app.include_router(tts_router)
+    app.include_router(websocket_router, prefix="/stream")
 
     return app
 
 
-# Application instance
+# Create the default app instance
 app = create_app()
-
-if __name__ == "__main__":
-    import uvicorn
-
-    settings = get_settings()
-    uvicorn.run(
-        "hermes.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.is_development,
-        workers=settings.workers if settings.is_production else 1,
-    )

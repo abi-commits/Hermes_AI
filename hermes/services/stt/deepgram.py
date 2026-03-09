@@ -11,35 +11,21 @@ import structlog
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 try:
-    from deepgram import AsyncDeepgramClient, LiveTranscriptionEvents  # type: ignore[import-untyped]
-    from deepgram.listen.v1.types import (  # type: ignore[import-untyped]
-        ListenV1Metadata,
-        ListenV1Results,
-        ListenV1SpeechStarted,
-        ListenV1UtteranceEnd,
+    # Modern Deepgram SDK (v3+)
+    from deepgram import (
+        DeepgramClient,
+        DeepgramClientOptions,
+        LiveTranscriptionEvents,
+        LiveOptions,
     )
-
-    _DEEPGRAM_SDK_VARIANT = "v5"
+    # The response types are often returned as objects with attributes
     HAS_DEEPGRAM = True
 except ImportError:
-    try:
-        from deepgram import DeepgramClient, LiveTranscriptionEvents  # type: ignore[import-untyped]
-        from deepgram.clients.listen.v1.websocket.response import (  # type: ignore[import-untyped]
-            LiveResultResponse as ListenV1Results,
-            MetadataResponse as ListenV1Metadata,
-            SpeechStartedResponse as ListenV1SpeechStarted,
-            UtteranceEndResponse as ListenV1UtteranceEnd,
-        )
-
-        _DEEPGRAM_SDK_VARIANT = "v3"
-        HAS_DEEPGRAM = True
-    except ImportError:
-        AsyncDeepgramClient = None  # type: ignore[assignment]
-        DeepgramClient = None  # type: ignore[assignment]
-        LiveTranscriptionEvents = None  # type: ignore[assignment]
-        ListenV1Metadata = ListenV1Results = ListenV1SpeechStarted = ListenV1UtteranceEnd = Any
-        _DEEPGRAM_SDK_VARIANT = None
-        HAS_DEEPGRAM = False
+    DeepgramClient = None
+    DeepgramClientOptions = None
+    LiveTranscriptionEvents = None
+    LiveOptions = None
+    HAS_DEEPGRAM = False
 
 from config import get_settings
 from hermes.core.exceptions import STTError, ServiceUnavailableError
@@ -73,37 +59,53 @@ class DeepgramSTTService(AbstractSTTService):
     async def connect(self) -> None:
         """Initialise the Deepgram client."""
         if not HAS_DEEPGRAM:
-            raise ServiceUnavailableError("Deepgram", "Deepgram SDK not installed")
+            raise ServiceUnavailableError("Deepgram", "Deepgram SDK not installed or import failed")
         if not self.settings.deepgram_api_key:
             raise ServiceUnavailableError("Deepgram", "DEEPGRAM_API_KEY not configured")
 
-        if _DEEPGRAM_SDK_VARIANT == "v5":
-            self._client = AsyncDeepgramClient(api_key=self.settings.deepgram_api_key)
-        elif _DEEPGRAM_SDK_VARIANT == "v3":
-            self._client = DeepgramClient(api_key=self.settings.deepgram_api_key)
-        else:
-            raise ServiceUnavailableError("Deepgram", "Unsupported Deepgram SDK variant")
-
-        self._logger.info("deepgram_client_created", sdk_variant=_DEEPGRAM_SDK_VARIANT)
+        try:
+            config = DeepgramClientOptions(
+                options={"keepalive": "true"}
+            )
+            self._client = DeepgramClient(self.settings.deepgram_api_key, config)
+            self._logger.info("deepgram_client_created", version="v3+")
+        except Exception as e:
+            self._logger.error("deepgram_init_failed", error=str(e))
+            raise ServiceUnavailableError("Deepgram", f"Failed to initialize client: {e}")
 
     async def disconnect(self) -> None:
-        """Discard the client reference (connections are managed per request)."""
+        """Discard the client reference."""
         self._client = None
         self._logger.info("deepgram_disconnected")
 
     # ------------------------------------------------------------------
-    # Final-transcript helpers
+    # Transcript helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_transcript(message: Any) -> str:
         """Return the top transcript alternative, or an empty string."""
-        channel = getattr(message, "channel", None)
-        alternatives = getattr(channel, "alternatives", None) if channel else None
-        if not alternatives:
+        try:
+            # Handle both object-style and dict-style responses
+            channel = getattr(message, "channel", None)
+            if channel is None and isinstance(message, dict):
+                channel = message.get("channel")
+            
+            alternatives = getattr(channel, "alternatives", None)
+            if alternatives is None and isinstance(channel, dict):
+                alternatives = channel.get("alternatives")
+
+            if not alternatives:
+                return ""
+            
+            alt = alternatives[0]
+            transcript = getattr(alt, "transcript", "")
+            if transcript == "" and isinstance(alt, dict):
+                transcript = alt.get("transcript", "")
+                
+            return (transcript or "").strip()
+        except Exception:
             return ""
-        transcript = getattr(alternatives[0], "transcript", "") or ""
-        return transcript.strip()
 
     def _consume_result(
         self,
@@ -111,7 +113,11 @@ class DeepgramSTTService(AbstractSTTService):
         finalized_segments: list[str],
     ) -> str | None:
         """Buffer final transcript segments and emit a full utterance when ready."""
-        if not getattr(message, "is_final", False):
+        is_final = getattr(message, "is_final", False)
+        if not is_final and isinstance(message, dict):
+            is_final = message.get("is_final", False)
+            
+        if not is_final:
             return None
 
         transcript = self._extract_transcript(message)
@@ -120,14 +126,18 @@ class DeepgramSTTService(AbstractSTTService):
 
         finalized_segments.append(transcript)
 
-        if getattr(message, "speech_final", False):
+        speech_final = getattr(message, "speech_final", False)
+        if not speech_final and isinstance(message, dict):
+            speech_final = message.get("speech_final", False)
+
+        if speech_final:
             return self._flush_segments(finalized_segments)
 
         return None
 
     @staticmethod
     def _flush_segments(finalized_segments: list[str]) -> str | None:
-        """Join buffered final segments into a single utterance and clear the buffer."""
+        """Join buffered final segments into a single utterance."""
         if not finalized_segments:
             return None
 
@@ -135,14 +145,14 @@ class DeepgramSTTService(AbstractSTTService):
         finalized_segments.clear()
         return utterance or None
 
-    def _live_transcription_options(self) -> dict[str, str | int]:
-        """Return the live transcription options for the current settings."""
+    def _live_transcription_options(self) -> dict[str, Any]:
+        """Return the live transcription options."""
         return {
             "model": self.settings.deepgram_model,
             "language": self.settings.deepgram_language,
-            "smart_format": "true",
-            "interim_results": "true",
-            "utterance_end_ms": str(self.settings.deepgram_utterance_end_ms),
+            "smart_format": True,
+            "interim_results": True,
+            "utterance_end_ms": self.settings.deepgram_utterance_end_ms,
             "encoding": "linear16",
             "sample_rate": 8000,
         }
@@ -151,9 +161,9 @@ class DeepgramSTTService(AbstractSTTService):
         self,
         audio_queue: "Queue[np.ndarray | None]",
         transcript_queue: "Queue[str | InterruptMarker | None]",
-        send_audio: "Callable[[bytes], Awaitable[None]]",
+        connection: Any,
     ) -> AsyncIterator[str | InterruptMarker]:
-        """Forward audio upstream while yielding transcripts or markers as soon as they arrive."""
+        """Forward audio while yielding transcripts."""
         audio_task = asyncio.create_task(audio_queue.get())
         transcript_task = asyncio.create_task(transcript_queue.get())
 
@@ -175,7 +185,8 @@ class DeepgramSTTService(AbstractSTTService):
                     if audio is None:
                         break
 
-                    await send_audio((audio * 32767).astype(np.int16).tobytes())
+                    audio_bytes = (audio * 32767).astype(np.int16).tobytes()
+                    await connection.send(audio_bytes)
                     audio_task = asyncio.create_task(audio_queue.get())
         finally:
             for task in (audio_task, transcript_task):
@@ -183,29 +194,14 @@ class DeepgramSTTService(AbstractSTTService):
                     task.cancel()
             await asyncio.gather(audio_task, transcript_task, return_exceptions=True)
 
-    async def _wait_for_finalize_flush(self) -> None:
-        """Allow a short grace period for trailing final events after finalize."""
-        grace_ms = self.settings.deepgram_finalize_grace_ms
-        if grace_ms > 0:
-            await asyncio.sleep(grace_ms / 1000)
-
     # ------------------------------------------------------------------
-    # Single-shot transcription
+    # Main API
     # ------------------------------------------------------------------
 
-    @retry(
-        retry=retry_if_exception_type((STTError, ConnectionError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        reraise=True,
-    )
     async def transcribe(self, audio: np.ndarray) -> str:
-        """Transcribe a PCM array via the Deepgram pre-recorded API (retried up to 3x)."""
+        """Transcribe via pre-recorded API."""
         if not HAS_DEEPGRAM:
             raise ServiceUnavailableError("Deepgram", "Deepgram SDK not installed")
-        if not self.settings.deepgram_api_key:
-            raise STTError("Deepgram API key not configured")
-
         if self._client is None:
             await self.connect()
 
@@ -215,195 +211,56 @@ class DeepgramSTTService(AbstractSTTService):
                 "model": self.settings.deepgram_model,
                 "language": self.settings.deepgram_language,
                 "smart_format": True,
-                "encoding": "linear16",
             }
-
-            if _DEEPGRAM_SDK_VARIANT == "v5":
-                response = await self._client.listen.v1.media.transcribe_file(
-                    {"buffer": audio_bytes},
-                    options,
-                )
-            else:
-                response = await self._client.listen.asyncrest.v("1").transcribe_file(
-                    {"buffer": audio_bytes},
-                    options,
-                )
-
-            transcript = ""
-            results = getattr(response, "results", None)
-            channels = getattr(results, "channels", None) if results else None
-            alternatives = channels[0].alternatives if channels else None
-            if alternatives:
-                transcript = getattr(alternatives[0], "transcript", None) or ""
-
-            self._logger.debug("transcription_complete", transcript=transcript[:50])
-            return transcript
-
-        except STTError:
-            raise
+            
+            response = await self._client.listen.asyncwebsocket.v("1").transcribe_file(
+                {"buffer": audio_bytes},
+                options,
+            )
+            
+            return self._extract_transcript(response)
         except Exception as exc:
             self._logger.error("transcription_failed", error=str(exc))
             raise STTError(f"Transcription failed: {exc}") from exc
-
-    # ------------------------------------------------------------------
-    # Streaming transcription
-    # ------------------------------------------------------------------
-
-    async def _drain_transcript_queue(
-        self,
-        transcript_queue: "Queue[str | InterruptMarker | None]",
-    ) -> AsyncIterator[str | InterruptMarker]:
-        """Yield all queued transcripts without blocking."""
-        while not transcript_queue.empty():
-            item = transcript_queue.get_nowait()
-            if item:
-                yield item
-
-    async def _stream_transcribe_v5(
-        self,
-        audio_queue: "Queue[np.ndarray | None]",
-        transcript_queue: "Queue[str | InterruptMarker | None]",
-    ) -> AsyncIterator[str | InterruptMarker]:
-        """Stream audio using the Deepgram v5 client."""
-        options = self._live_transcription_options()
-        finalized_segments: list[str] = []
-
-        async with self._client.listen.v1.connect(options) as connection:
-
-            async def _on_message(self, message: ListenV1Results, **kwargs) -> None:  # type: ignore[name-defined]
-                utterance = self._consume_result(message, finalized_segments)
-                if utterance:
-                    await transcript_queue.put(utterance)
-
-            async def _on_speech_started(self, speech_started: ListenV1SpeechStarted, **kwargs) -> None:  # type: ignore[name-defined]
-                self._logger.debug("deepgram_speech_started")
-                await transcript_queue.put(InterruptMarker())
-
-            async def _on_utterance_end(self, message: ListenV1UtteranceEnd, **kwargs) -> None:  # type: ignore[name-defined]
-                utterance = self._flush_segments(finalized_segments)
-                if utterance:
-                    await transcript_queue.put(utterance)
-
-            async def _on_error(self, error: object, **kwargs) -> None:
-                self._logger.error("deepgram_live_error", error=str(error))
-
-            connection.on(LiveTranscriptionEvents.Transcript, _on_message)
-            connection.on(LiveTranscriptionEvents.SpeechStarted, _on_speech_started)
-            connection.on(LiveTranscriptionEvents.UtteranceEnd, _on_utterance_end)
-            connection.on(LiveTranscriptionEvents.Error, _on_error)
-
-            listen_task = asyncio.create_task(connection.start_listening())
-            self._logger.info("deepgram_live_connection_opened", sdk_variant="v5")
-
-            try:
-                async for item in self._stream_live_events(
-                    audio_queue,
-                    transcript_queue,
-                    connection.send_media,
-                ):
-                    yield item
-
-                await connection.send_finalize()
-                self._logger.debug("deepgram_finalize_sent")
-                await self._wait_for_finalize_flush()
-
-                utterance = self._flush_segments(finalized_segments)
-                if utterance:
-                    await transcript_queue.put(utterance)
-
-            finally:
-                listen_task.cancel()
-                try:
-                    await listen_task
-                except asyncio.CancelledError:
-                    pass
-                self._logger.info("deepgram_live_connection_closed", sdk_variant="v5")
-
-        async for item in self._drain_transcript_queue(transcript_queue):
-            yield item
-
-    async def _stream_transcribe_v3(
-        self,
-        audio_queue: "Queue[np.ndarray | None]",
-        transcript_queue: "Queue[str | InterruptMarker | None]",
-    ) -> AsyncIterator[str | InterruptMarker]:
-        """Stream audio using the Deepgram v3 async websocket client."""
-        options = self._live_transcription_options()
-        finalized_segments: list[str] = []
-        connection = self._client.listen.asyncwebsocket.v("1")
-
-        async def _on_message(self, message: ListenV1Results, **kwargs) -> None:  # type: ignore[name-defined]
-            utterance = self._consume_result(message, finalized_segments)
-            if utterance:
-                await transcript_queue.put(utterance)
-
-        async def _on_speech_started(self, speech_started: ListenV1SpeechStarted, **kwargs) -> None:  # type: ignore[name-defined]
-            self._logger.debug("deepgram_speech_started")
-            await transcript_queue.put(InterruptMarker())
-
-        async def _on_utterance_end(self, message: ListenV1UtteranceEnd, **kwargs) -> None:  # type: ignore[name-defined]
-            utterance = self._flush_segments(finalized_segments)
-            if utterance:
-                await transcript_queue.put(utterance)
-
-        async def _on_error(self, error: object, **kwargs) -> None:
-            self._logger.error("deepgram_live_error", error=str(error))
-
-        connection.on(LiveTranscriptionEvents.Transcript, _on_message)
-        connection.on(LiveTranscriptionEvents.SpeechStarted, _on_speech_started)
-        connection.on(LiveTranscriptionEvents.UtteranceEnd, _on_utterance_end)
-        connection.on(LiveTranscriptionEvents.Error, _on_error)
-
-        started = await connection.start(options)
-        if not started:
-            raise STTError("Failed to start Deepgram live transcription")
-
-        self._logger.info("deepgram_live_connection_opened", sdk_variant="v3")
-
-        try:
-            async for item in self._stream_live_events(
-                audio_queue,
-                transcript_queue,
-                connection.send,
-            ):
-                yield item
-
-            await connection.finalize()
-            self._logger.debug("deepgram_finalize_sent")
-            await self._wait_for_finalize_flush()
-
-            utterance = self._flush_segments(finalized_segments)
-            if utterance:
-                await transcript_queue.put(utterance)
-
-        finally:
-            await connection.finish()
-            self._logger.info("deepgram_live_connection_closed", sdk_variant="v3")
-
-        async for item in self._drain_transcript_queue(transcript_queue):
-            yield item
 
     async def stream_transcribe(
         self,
         audio_queue: asyncio.Queue[np.ndarray],
     ) -> AsyncIterator[str | InterruptMarker]:
-        """Stream audio to Deepgram and yield transcripts or InterruptMarkers."""
+        """Stream audio to Deepgram."""
         if not HAS_DEEPGRAM:
             raise ServiceUnavailableError("Deepgram", "Deepgram SDK not installed")
-
         if self._client is None:
             await self.connect()
 
         transcript_queue: asyncio.Queue[str | InterruptMarker | None] = asyncio.Queue()
+        finalized_segments: list[str] = []
+        
+        options = LiveOptions(**self._live_transcription_options())
+        connection = self._client.listen.asyncwebsocket.v("1")
 
-        if _DEEPGRAM_SDK_VARIANT == "v5":
-            async for item in self._stream_transcribe_v5(audio_queue, transcript_queue):
+        async def _on_message(self, result, **kwargs) -> None:
+            utterance = self._consume_result(result, finalized_segments)
+            if utterance:
+                await transcript_queue.put(utterance)
+
+        async def _on_speech_started(self, speech_started, **kwargs) -> None:
+            self._logger.debug("deepgram_speech_started")
+            await transcript_queue.put(InterruptMarker())
+
+        async def _on_error(self, error, **kwargs) -> None:
+            self._logger.error("deepgram_live_error", error=str(error))
+
+        connection.on(LiveTranscriptionEvents.Transcript, _on_message)
+        connection.on(LiveTranscriptionEvents.SpeechStarted, _on_speech_started)
+        connection.on(LiveTranscriptionEvents.Error, _on_error)
+
+        if not await connection.start(options):
+            raise STTError("Failed to start Deepgram connection")
+
+        try:
+            async for item in self._stream_live_events(audio_queue, transcript_queue, connection):
                 yield item
-            return
-
-        if _DEEPGRAM_SDK_VARIANT == "v3":
-            async for item in self._stream_transcribe_v3(audio_queue, transcript_queue):
-                yield item
-            return
-
-        raise ServiceUnavailableError("Deepgram", "Unsupported Deepgram SDK variant")
+        finally:
+            await connection.finish()
+            self._logger.info("deepgram_live_connection_closed")

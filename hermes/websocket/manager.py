@@ -37,8 +37,17 @@ class ConnectionManager:
         stream_sid = start_msg.start.stream_sid
         account_sid = start_msg.start.account_sid
 
+        self._logger.info(
+            "manager_connect_starting",
+            call_sid=call_sid,
+            stream_sid=stream_sid,
+            has_orchestrator=bool(self._orchestrator),
+            has_greeting=bool(config.greeting) if config else False,
+        )
+
         # If we have an orchestrator, use it to manage the call lifecycle
         if self._orchestrator:
+            self._logger.debug("using_orchestrator_for_call", call_sid=call_sid)
             call = await self._orchestrator.create_call(
                 websocket=websocket,
                 call_sid=call_sid,
@@ -48,6 +57,7 @@ class ConnectionManager:
             )
         else:
             # Fallback for standalone/test usage
+            self._logger.debug("using_standalone_call", call_sid=call_sid)
             call = Call(
                 call_sid=call_sid,
                 stream_sid=stream_sid,
@@ -66,6 +76,7 @@ class ConnectionManager:
             call_sid=call_sid,
             stream_sid=stream_sid,
             total_active=len(self._active_calls),
+            call_state=call.state.name if hasattr(call.state, 'name') else str(call.state),
         )
         return call
 

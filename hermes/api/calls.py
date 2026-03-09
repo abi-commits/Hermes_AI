@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/calls", tags=["Calls"])
+router = APIRouter(prefix="/calls")
 
 
 # ---------------------------------------------------------------------------

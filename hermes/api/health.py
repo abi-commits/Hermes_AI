@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from config import get_settings
 from hermes import __version__
 
-router = APIRouter(tags=["System"])
+router = APIRouter()
 
 
 class HealthResponse(BaseModel):

@@ -1,79 +1,67 @@
-"""Custom logging utilities."""
+"""Structured logging configuration for Hermes."""
 
-import json
 import logging
+import sys
 from typing import Any
 
-
-class JSONFormatter(logging.Formatter):
-    """Formats log records as JSON."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Return the log record serialised as a JSON string."""
-        log_data: dict[str, Any] = {
-            "timestamp": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-
-        # Add exception info if present
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-
-        # Add extra fields from record
-        for key, value in record.__dict__.items():
-            if key not in (
-                "name",
-                "msg",
-                "args",
-                "levelname",
-                "levelno",
-                "pathname",
-                "filename",
-                "module",
-                "exc_info",
-                "exc_text",
-                "stack_info",
-                "lineno",
-                "funcName",
-                "created",
-                "msecs",
-                "relativeCreated",
-                "thread",
-                "threadName",
-                "processName",
-                "process",
-                "message",
-                "asctime",
-            ):
-                log_data[key] = value
-
-        return json.dumps(log_data, default=str)
+import structlog
+from structlog.types import Processor
 
 
-def configure_logging(log_level: str = "INFO", json_format: bool = False) -> None:
-    """Configure root logger with the given level and optionally JSON output."""
+def configure_logging(environment: str = "development", log_level: str = "INFO") -> None:
+    """Configure unified structured logging for the entire application.
+    
+    Integrates standard Python logging with structlog to ensure all logs
+    (including those from libraries) are consistent.
+    """
+    is_production = environment.lower() == "production"
     level = getattr(logging, log_level.upper(), logging.INFO)
 
-    formatter: logging.Formatter
-    if json_format:
-        formatter = JSONFormatter()
+    # 1. Standard library logging configuration
+    # We pipe all standard library logs through structlog
+    shared_processors: list[Processor] = [
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+    ]
+
+    if is_production:
+        shared_processors.append(structlog.processors.JSONRenderer())
     else:
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        shared_processors.append(structlog.dev.ConsoleRenderer())
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    handler.setLevel(level)
+    # Configure the standard logging to use structlog's formatting
+    structlog.configure(
+        processors=shared_processors,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
 
-    # Root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    root_logger.handlers = [handler]
-
-    # Reduce noise from external libraries
+    # 2. Final plumbing for the standard library
+    # Redirect standard logging to our shared processors
+    handler = logging.StreamHandler(sys.stdout)
+    
+    # Simple formatter for the handler as structlog does the heavy lifting
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=level,
+    )
+    
+    # Optional: Silence noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("twilio").setLevel(logging.INFO)
+    
+    # Special case: ChromaDB can be very noisy
+    logging.getLogger("chromadb").setLevel(logging.WARNING)
+    
+    # 3. Add global context if needed
+    structlog.contextvars.clear_contextvars()

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
 import re
 from collections.abc import AsyncIterator
 from typing import Callable
 
+import structlog
 from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
@@ -29,7 +29,7 @@ from hermes.models.llm import (
 from hermes.prompts.prompt_manager import PromptManager
 from hermes.services.llm.base import AbstractLLMService
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Sentence splitter

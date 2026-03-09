@@ -11,6 +11,11 @@ class StreamParameters(BaseModel):
     call_sid: str = Field(..., alias="callSid", description="Twilio call SID")
     account_sid: str = Field(..., alias="accountSid", description="Twilio account SID")
     stream_sid: str = Field(..., alias="streamSid", description="Media stream SID")
+    custom_parameters: dict[str, str] = Field(
+        default_factory=dict,
+        alias="customParameters",
+        description="Custom parameters passed from TwiML <Parameter> tags",
+    )
 
     model_config = {"populate_by_name": True}
 

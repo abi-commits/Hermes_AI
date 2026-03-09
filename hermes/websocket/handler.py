@@ -1,6 +1,7 @@
 """Main WebSocket endpoint handler for Twilio media streams."""
 
 import json
+import asyncio
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -70,25 +71,46 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                     await websocket.close(code=4001, reason="Call SID mismatch")
                     return
 
-                # Create call instance with default greeting from settings
+                # Prioritize greeting from customParameters, fallback to settings
                 settings = get_settings()
-                config = CallConfig(greeting=settings.llm_greeting)
-                call = await manager.connect(websocket, start_msg, config=config)
+                greeting = start_msg.start.custom_parameters.get("greeting") or settings.llm_greeting
+
+                logger.info("start_event_greeting", call_sid=call_sid, has_greeting=bool(greeting), greeting_preview=greeting[:50] if greeting else None)
+
+                config = CallConfig(greeting=greeting)
+
+                # ── CRITICAL FIX: Launch connection in background ──
+                # This prevents heavy initialization from blocking the WebSocket receiver.
+                connect_task = asyncio.create_task(
+                    manager.connect(websocket, start_msg, config=config),
+                    name=f"connect-{call_sid}"
+                )
+
+                # Fetch the call handle lazily when media arrives
+                logger.info("connection_task_launched", call_sid=call_sid, task_name=connect_task.get_name())
 
             elif event_type == "media":
                 # Media event - process audio
-                if call is None:
-                    logger.warning("media_before_start", call_sid=call_sid)
-                    continue
-
                 media_msg = MediaMessage(**message)
-                await manager.handle_media(media_msg)
+                
+                # Fetch call lazily if not already known
+                if call is None:
+                    call = manager.get_call(call_sid)
+                
+                if call:
+                    await manager.handle_media(media_msg)
+                else:
+                    # Still initializing, drop chunk or log
+                    logger.debug("media_dropped_during_init", call_sid=call_sid)
 
             elif event_type == "dtmf":
                 # DTMF event - handle touch tones
                 dtmf_digit = message.get("dtmf", {}).get("digit")
                 logger.info("dtmf_received", call_sid=call_sid, digit=dtmf_digit)
 
+                if call is None:
+                    call = manager.get_call(call_sid)
+                
                 if call:
                     await call.handle_dtmf(dtmf_digit)
 

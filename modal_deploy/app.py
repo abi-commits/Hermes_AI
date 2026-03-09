@@ -17,39 +17,33 @@ def _build_image() -> modal.Image:
     """Build a lightweight Modal image for the production API.
     
     Uses Python 3.11 for consistency with the TTS worker and maximum stability.
+    CACHE_BUST: 2026-03-09T09:00:00Z
     """
     return (
         modal.Image.debian_slim(python_version="3.11")
+        .apt_install("libsndfile1")
         .pip_install(
-            # Force specific versions to resolve ONNX/ml_dtypes compatibility issues
             "ml-dtypes>=0.5.0",
             "numpy>=1.26.0,<2.0.0",
-            # Core web framework
             "fastapi>=0.115.0",
             "uvicorn[standard]>=0.32.0",
             "python-multipart>=0.0.12",
             "httpx>=0.27.0",
-            # Configuration & validation
             "pydantic>=2.9.0",
             "pydantic-settings>=2.6.0",
-            # Logging & monitoring
             "structlog>=24.4.0",
             "prometheus-client>=0.21.0",
-            # Data & services
             "sqlalchemy>=2.0.0",
             "chromadb>=0.5.0",
-            # External services
             "tenacity>=9.0.0",
             "twilio>=9.10.0",
             "pyyaml>=6.0",
-            "deepgram-sdk>=3.11.0",
+            "deepgram-sdk==3.11.0", # Explicit version
             "google-genai>=1.0.0",
-            # LLM & RAG
             "langchain>=0.3.0",
             "langchain-text-splitters>=0.3.0",
             "rank-bm25>=0.2.2",
             "soxr>=0.5.0",
-            # Modal deployment
             "modal>=1.3.5",
         )
         .workdir("/app")

@@ -10,7 +10,7 @@ from config import get_settings
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/twilio", tags=["Telephony"])
+router = APIRouter(prefix="/twilio")
 
 
 def _build_stream_twiml(stream_url: str) -> str:

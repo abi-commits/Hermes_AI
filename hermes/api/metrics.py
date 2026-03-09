@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -12,7 +12,7 @@ from prometheus_client import (
     generate_latest,
 )
 
-router = APIRouter(tags=["System"])
+router = APIRouter(prefix="/metrics", tags=["System"])
 
 # Application info
 APP_INFO = Info("hermes_info", "Hermes application information")
@@ -182,7 +182,11 @@ class MetricsCollector:
         CALL_INTERRUPTS.inc()
 
 
-@router.get("")
+@router.get(
+    "",
+    summary="Prometheus Metrics",
+    description="Returns application metrics in Prometheus text format.",
+)
 async def metrics() -> Response:
     """Return Prometheus-formatted metrics."""
     return Response(
@@ -191,9 +195,13 @@ async def metrics() -> Response:
     )
 
 
-@router.get("/json")
+@router.get(
+    "/json",
+    summary="JSON Metrics",
+    description="Return active call and WebSocket counts as JSON (for debugging).",
+)
 async def metrics_json() -> dict:
-    """Return active call and WebSocket counts as JSON (for debugging)."""
+    """Return metrics as JSON."""
     return {
         "active_calls": ACTIVE_CALLS._value.get(),  # type: ignore
         "websocket_connections": WS_CONNECTIONS._value.get(),  # type: ignore

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -143,14 +144,14 @@ class RemoteChatterboxTTSWorker:
             embed_watermark=embed_watermark,
         )
 
-    @modal.method()
+    @modal.method(is_generator=True)
     async def generate_stream(
         self,
         text: str,
         audio_prompt_path: str | None = None,
         embed_watermark: bool = False,
         chunk_size: int | None = None,
-    ):
+    ) -> AsyncIterator[bytes]:
         """Stream native-rate PCM audio chunks."""
         async for chunk in self._service.generate_stream(
             text=text,

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/tts", tags=["Speech Synthesis"])
+router = APIRouter(prefix="/tts")
 
 
 class SynthesisRequest(BaseModel):
@@ -54,7 +54,6 @@ async def synthesize_speech(
             headers={
                 "X-Sample-Rate": str(tts.sample_rate),
                 "X-TTS-Provider": provider_name,
-                "Content-Disposition": 'attachment; filename="synthesis.pcm"'
             }
         )
         
