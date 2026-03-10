@@ -191,6 +191,7 @@ class Call:
 
         # Transition to listening state
         await self._transition_to(CallState.LISTENING)
+        self._logger.info("call_start_complete", greeting_sent=bool(greeting))
 
     def _start_tasks(self) -> None:
         """Start background processing tasks."""
@@ -240,6 +241,13 @@ class Call:
             error=str(error),
         )
 
+        # ── RESILIENCE: If it's a cold-start STT failure, give TTS a chance ──
+        # This allows the greeting to play even if Deepgram is slow to connect.
+        if task_name.startswith("stt") and self._state == CallState.CONNECTING:
+            self._logger.warning("stt_failed_during_connect_continuing_for_greeting")
+            self._background_failure_reported = False # Reset so next failure actually stops it
+            return
+
         if self._task_error_handler is not None:
             try:
                 await self._task_error_handler(self.call_sid, error)
@@ -286,30 +294,29 @@ class Call:
 
         self._logger.info("stt_task_started")
 
-        # Queue of decoded PCM arrays fed into the Deepgram live connection.
-        pcm_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=200)
+        # Pass raw µ-law bytes directly to Deepgram (avoids PCM conversion)
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
 
         async def _feed_audio() -> None:
-            """Decode µ-law frames and push PCM arrays to the queue."""
+            """Forward raw µ-law frames to the queue."""
             while self._running:
                 try:
                     audio_bytes = await asyncio.wait_for(
                         self.audio_in_queue.get(), timeout=0.5
                     )
-                    pcm_array = decode_mulaw(audio_bytes)
                     MetricsCollector.record_audio_bytes("inbound", len(audio_bytes))
-                    await pcm_queue.put(pcm_array)
+                    await audio_queue.put(audio_bytes)
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
-                    await pcm_queue.put(None)
+                    await audio_queue.put(None)
                     raise
 
         feeder = asyncio.create_task(
             _feed_audio(), name=f"stt-feeder-{self.call_sid}"
         )
         try:
-            async for item in self._adapters.stt.stream_transcribe(pcm_queue):
+            async for item in self._adapters.stt.stream_transcribe(audio_queue):
                 if isinstance(item, InterruptMarker):
                     # Immediate barge-in on speech detection
                     await self.interrupt()
@@ -462,6 +469,12 @@ class Call:
                 self._logger.debug("tts_generating_stream", text=text[:60])
                 try:
                     async for chunk_bytes in self._adapters.tts.generate_stream(text):
+                        # Track session-wide Time to First Byte (TTFB)
+                        if chunk_count == 0 and not hasattr(self, "_first_byte_sent") and self.started_at:
+                            latency_ms = (datetime.now(UTC) - self.started_at).total_seconds() * 1000
+                            self._logger.info("tts_first_byte_sent", latency_ms=round(latency_ms, 2))
+                            self._first_byte_sent = True
+
                         # 1. Resample 24 kHz → 8 kHz (Twilio expects 8 kHz PCMU)
                         resampled = resample_to_8khz(
                             chunk_bytes, self._adapters.tts.sample_rate

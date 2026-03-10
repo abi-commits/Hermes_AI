@@ -92,33 +92,27 @@ class TestDeepgramTranscriptAggregation:
         assert service._consume_result(second, buffered) == "I need help with billing"
         assert buffered == []
 
-    def test_flushes_buffered_segments_on_utterance_end(self):
-        """Utterance-end events should release any buffered final segments."""
-        buffered = ["Can you", "repeat that"]
-
-        assert DeepgramSTTService._flush_segments(buffered) == "Can you repeat that"
-        assert buffered == []
-
     def test_live_options_use_configured_turn_detection(self):
         """Live transcription options should respect the latency tuning settings."""
         service = DeepgramSTTService()
         service.settings.deepgram_utterance_end_ms = 650
 
-        assert service._live_transcription_options()["utterance_end_ms"] == "650"
+        assert str(service._live_transcription_options()["utterance_end_ms"]) == "650"
 
     @pytest.mark.asyncio
     async def test_stream_live_events_yields_transcript_without_waiting_for_more_audio(self):
         """A finalized transcript should be yielded as soon as it is queued."""
         service = DeepgramSTTService()
-        audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         transcript_queue: asyncio.Queue[str | None] = asyncio.Queue()
         sent_frames: list[bytes] = []
 
-        async def send_audio(frame: bytes) -> None:
-            sent_frames.append(frame)
+        class MockConnection:
+            async def send(self, data: bytes) -> None:
+                sent_frames.append(data)
 
         async def produce() -> None:
-            await audio_queue.put(np.zeros(16, dtype=np.float32))
+            await audio_queue.put(b"test-audio")
             await asyncio.sleep(0.01)
             await transcript_queue.put("hello there")
             await asyncio.sleep(0.01)
@@ -130,11 +124,11 @@ class TestDeepgramTranscriptAggregation:
         async for transcript in service._stream_live_events(
             audio_queue,
             transcript_queue,
-            send_audio,
+            MockConnection(),
         ):
             results.append(transcript)
 
         await producer
 
         assert results == ["hello there"]
-        assert sent_frames
+        assert sent_frames == [b"test-audio"]

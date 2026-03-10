@@ -22,6 +22,11 @@ class ConnectionManager:
         self._orchestrator: CallOrchestrator | None = None
         self._logger = structlog.get_logger(__name__)
 
+    @property
+    def orchestrator(self) -> "CallOrchestrator | None":
+        """Access the current call orchestrator."""
+        return self._orchestrator
+
     def set_orchestrator(self, orchestrator: "CallOrchestrator") -> None:
         """Attach the call orchestrator for lifecycle management."""
         self._orchestrator = orchestrator
@@ -45,40 +50,44 @@ class ConnectionManager:
             has_greeting=bool(config.greeting) if config else False,
         )
 
-        # If we have an orchestrator, use it to manage the call lifecycle
-        if self._orchestrator:
-            self._logger.debug("using_orchestrator_for_call", call_sid=call_sid)
-            call = await self._orchestrator.create_call(
-                websocket=websocket,
+        try:
+            # If we have an orchestrator, use it to manage the call lifecycle
+            if self._orchestrator:
+                self._logger.debug("using_orchestrator_for_call", call_sid=call_sid)
+                call = await self._orchestrator.create_call(
+                    websocket=websocket,
+                    call_sid=call_sid,
+                    stream_sid=stream_sid,
+                    account_sid=account_sid,
+                    config=config,
+                )
+            else:
+                # Fallback for standalone/test usage
+                self._logger.debug("using_standalone_call", call_sid=call_sid)
+                call = Call(
+                    call_sid=call_sid,
+                    stream_sid=stream_sid,
+                    websocket=websocket,
+                    account_sid=account_sid,
+                    persona=config.persona if config else "default",
+                )
+                # Standalone mode must still respect the greeting
+                await call.start(greeting=config.greeting if config else None)
+
+            self._active_calls[call_sid] = call
+            self._stream_map[stream_sid] = call_sid
+
+            self._logger.info(
+                "websocket_connected",
                 call_sid=call_sid,
                 stream_sid=stream_sid,
-                account_sid=account_sid,
-                config=config,
+                total_active=len(self._active_calls),
+                call_state=call.state.name if hasattr(call.state, 'name') else str(call.state),
             )
-        else:
-            # Fallback for standalone/test usage
-            self._logger.debug("using_standalone_call", call_sid=call_sid)
-            call = Call(
-                call_sid=call_sid,
-                stream_sid=stream_sid,
-                websocket=websocket,
-                account_sid=account_sid,
-                persona=config.persona if config else "default",
-            )
-            # Standalone mode must still respect the greeting
-            await call.start(greeting=config.greeting if config else None)
-
-        self._active_calls[call_sid] = call
-        self._stream_map[stream_sid] = call_sid
-
-        self._logger.info(
-            "websocket_connected",
-            call_sid=call_sid,
-            stream_sid=stream_sid,
-            total_active=len(self._active_calls),
-            call_state=call.state.name if hasattr(call.state, 'name') else str(call.state),
-        )
-        return call
+            return call
+        except Exception as e:
+            self._logger.exception("manager_connect_failed", call_sid=call_sid, error=str(e))
+            raise
 
     async def disconnect(self, stream_sid: str) -> None:
         """Unregister a stream and signal the orchestrator to terminate the call."""

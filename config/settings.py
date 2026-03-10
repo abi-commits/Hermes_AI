@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server host")
     port: int = Field(default=8000, description="Server port")
     workers: int = Field(default=1, description="Number of worker processes")
+    thread_pool_workers: int = Field(
+        default=4,
+        ge=1,
+        description="Number of threads in the shared ThreadPoolExecutor",
+    )
 
     # ==========================================================================
     # Twilio Settings

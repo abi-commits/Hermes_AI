@@ -37,7 +37,7 @@ class AbstractSTTService(ABC):
     @abstractmethod
     def stream_transcribe(
         self,
-        audio_queue: "asyncio.Queue[np.ndarray]",
+        audio_queue: "asyncio.Queue[bytes]",
     ) -> AsyncIterator[str | InterruptMarker]:
         """Yield transcript fragments or InterruptMarkers in real-time."""
 ...

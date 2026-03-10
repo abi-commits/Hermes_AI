@@ -22,10 +22,11 @@ class HealthResponse(BaseModel):
 
 
 class ReadinessResponse(BaseModel):
-    """Readiness probe response model (maintained for backward compatibility)."""
+    """Readiness probe response model."""
 
     status: str = Field(..., example="ready")
     checks: dict[str, bool]
+    details: dict[str, str] | None = None
 
 
 @router.get(
@@ -52,48 +53,61 @@ async def health_check() -> HealthResponse:
 )
 async def readiness_check(request: Request) -> ReadinessResponse:
     """Check if all internal and external services are ready."""
-    checks: dict[str, bool] = {}
+    checks: dict[str, Any] = {}
+    details: dict[str, str] = {}
 
     # 1. RAG Check
     try:
         rag = getattr(request.app.state, "rag_service", None)
         if rag:
-            await rag.get_collection_stats()
-            checks["rag"] = True
+            stats = await rag.get_collection_stats()
+            checks["rag"] = "ready"
+            details["rag"] = f"Collection active with {stats.get('count', 0)} documents"
         else:
-            checks["rag"] = False
-    except Exception:
-        checks["rag"] = False
+            checks["rag"] = "initializing"
+            details["rag"] = "RAG service not yet attached to app state"
+    except Exception as e:
+        checks["rag"] = "failed"
+        details["rag"] = str(e)
 
     # 2. TTS Check
     try:
         tts = getattr(request.app.state, "tts_service", None)
         if tts:
-            is_alive = True
             if hasattr(tts, "ping"):
-                is_alive = await tts.ping()
+                if await tts.ping():
+                    checks["tts"] = "ready"
+                    details["tts"] = "Remote worker responsive"
+                else:
+                    checks["tts"] = "warming_up"
+                    details["tts"] = "Remote worker not yet responding to ping"
             else:
-                # Local check: ensure sample_rate is readable
-                _ = tts.sample_rate
-            checks["tts"] = is_alive
+                checks["tts"] = "ready"
+                details["tts"] = "Local TTS engine initialized"
         else:
-            checks["tts"] = False
-    except Exception:
-        checks["tts"] = False
+            checks["tts"] = "initializing"
+            details["tts"] = "TTS service not yet attached to app state"
+    except Exception as e:
+        checks["tts"] = "failed"
+        details["tts"] = str(e)
 
     # 3. LLM Check
     llm = getattr(request.app.state, "llm_service", None)
-    llm_ready = llm is not None
+    if llm:
+        checks["llm"] = "ready"
+    else:
+        checks["llm"] = "initializing"
 
     # Mandatory readiness (RAG and TTS are always required)
-    mandatory_ready = checks["rag"] and checks["tts"]
+    is_ready = checks.get("rag") == "ready" and checks.get("tts") == "ready"
     
     # In production, LLM is also required
     settings = get_settings()
     if settings.is_production:
-        mandatory_ready = mandatory_ready and llm_ready
+        is_ready = is_ready and checks.get("llm") == "ready"
 
     return ReadinessResponse(
-        status="ready" if mandatory_ready else "not_ready",
-        checks=checks,  # Only contains rag and tts
+        status="ready" if is_ready else "not_ready",
+        checks={k: v == "ready" for k, v in checks.items() if k in ["rag", "tts"]},
+        details=details if not is_ready else None
     )

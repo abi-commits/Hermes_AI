@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from config import get_settings
 from hermes.core.orchestrator import CallConfig
-from hermes.websocket.manager import ConnectionManager
+from hermes.websocket.manager import connection_manager
 from hermes.websocket.schemas import (
     ConnectedMessage,
     MediaMessage,
@@ -21,23 +21,27 @@ logger = structlog.get_logger(__name__)
 websocket_router = APIRouter()
 
 
-def _get_manager(websocket: WebSocket) -> ConnectionManager:
-    """Get the ConnectionManager from app state.
-
-    Falls back to creating a new one if not configured (e.g. in tests).
-    """
-    if hasattr(websocket.app.state, "connection_manager"):
-        return websocket.app.state.connection_manager
-    return ConnectionManager()
-
-
 @websocket_router.websocket("/{call_sid}")
 async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
     """Handle a Twilio media stream WebSocket connection."""
     await websocket.accept()
     logger.info("websocket_accepted", call_sid=call_sid)
 
-    manager = _get_manager(websocket)
+    # Use global singleton directly
+    manager = connection_manager
+    
+    # ── Wait for background orchestrator to be ready ──
+    # This prevents "standalone call" fallback if the app is still warming up
+    retry_count = 0
+    while not manager.orchestrator and retry_count < 300: # Wait up to 30s
+        await asyncio.sleep(0.1)
+        retry_count += 1
+    
+    if not manager.orchestrator:
+        logger.error("orchestrator_not_ready_timeout", call_sid=call_sid)
+        await websocket.close(code=1011, reason="System initializing")
+        return
+
     call = None
 
     try:
@@ -74,20 +78,16 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                 # Prioritize greeting from customParameters, fallback to settings
                 settings = get_settings()
                 greeting = start_msg.start.custom_parameters.get("greeting") or settings.llm_greeting
-
-                logger.info("start_event_greeting", call_sid=call_sid, has_greeting=bool(greeting), greeting_preview=greeting[:50] if greeting else None)
-
+                
                 config = CallConfig(greeting=greeting)
-
-                # ── CRITICAL FIX: Launch connection in background ──
-                # This prevents heavy initialization from blocking the WebSocket receiver.
-                connect_task = asyncio.create_task(
+                
+                # Launch connection in background to avoid blocking the receiver
+                asyncio.create_task(
                     manager.connect(websocket, start_msg, config=config),
                     name=f"connect-{call_sid}"
                 )
-
-                # Fetch the call handle lazily when media arrives
-                logger.info("connection_task_launched", call_sid=call_sid, task_name=connect_task.get_name())
+                
+                logger.info("connection_task_launched", call_sid=call_sid)
 
             elif event_type == "media":
                 # Media event - process audio
