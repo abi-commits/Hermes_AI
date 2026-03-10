@@ -108,9 +108,16 @@ class RemoteChatterboxTTSWorker:
     @modal.enter()
     def enter(self) -> None:
         """Initialise the in-container TTS service once per warm worker."""
+        # 1. Configure structured logging inside the container
+        from hermes.utils.logging import configure_logging
+        configure_logging(environment="production")
+        import structlog
+        self._logger = structlog.get_logger(__name__)
+
         os.environ.setdefault("PYTHONPATH", "/app")
-        if CONFIG.model_cache_volume_name:
-            os.environ.setdefault("HF_HOME", str(Path(CONFIG.model_cache_mount_path) / "hf"))
+        os.environ.setdefault("HF_HOME", "/cache/hf")
+        
+        self._logger.info("worker_entering", app_name=CONFIG.tts_app_name)
 
         from hermes.services.tts import ChatterboxTTSService
 

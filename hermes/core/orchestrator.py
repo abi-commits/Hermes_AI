@@ -39,15 +39,17 @@ class ServiceBundle:
     rag_service: "AbstractRAGService"
 
 
-@dataclass
+@dataclass(frozen=True)
 class CallConfig:
     """Per-call configuration options."""
 
     persona: str = "default"
     greeting: str | None = None
+    initial_prompt: str | None = None
     rag_metadata_filter: dict[str, Any] | None = None
     max_history: int = 20
     fallback_phrase: str = "I'm sorry, I had a problem. Could you repeat that?"
+
     language: str | None = None
 
 
@@ -125,7 +127,7 @@ class CallOrchestrator:
             self._active_calls[call_sid] = call
 
         try:
-            await call.start(greeting=cfg.greeting)
+            await call.start(greeting=cfg.greeting, initial_prompt=cfg.initial_prompt)
         except Exception as exc:
             async with self._lock:
                 self._active_calls.pop(call_sid, None)

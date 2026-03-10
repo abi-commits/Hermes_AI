@@ -130,7 +130,7 @@ class Call:
         end = self.ended_at or datetime.now(UTC)
         return (end - self.started_at).total_seconds()
 
-    async def start(self, greeting: str | None = None) -> None:
+    async def start(self, greeting: str | None = None, initial_prompt: str | None = None) -> None:
         """Start the call, initialise services lazily if not injected, and begin background tasks."""
         from config import get_settings
 
@@ -182,16 +182,21 @@ class Call:
         # This ensures we are listening for barge-in even during the initial greeting.
         self._start_tasks()
 
-        # Optional initial greeting
+        # 1. Optional initial greeting
         if greeting:
             self._logger.info("queuing_initial_greeting", text=greeting)
             await self.audio_out_queue.put(greeting)
             self.conversation.append(ConversationTurn(role="assistant", content=greeting))
             self._logger.info("initial_greeting_queued", text=greeting)
 
+        # 2. ── NEW: Optional initial prompt injection (for testing LLM streaming) ──
+        if initial_prompt:
+            self._logger.info("injecting_test_prompt", text=initial_prompt)
+            await self.text_out_queue.put(initial_prompt)
+
         # Transition to listening state
         await self._transition_to(CallState.LISTENING)
-        self._logger.info("call_start_complete", greeting_sent=bool(greeting))
+        self._logger.info("call_start_complete", greeting_sent=bool(greeting), prompt_injected=bool(initial_prompt))
 
     def _start_tasks(self) -> None:
         """Start background processing tasks."""
@@ -532,20 +537,27 @@ class Call:
 
     async def interrupt(self) -> None:
         """Stop current TTS, drain pending sentences, clear Twilio buffer, return to LISTENING."""
-        self._interrupt_event.set()
+        async with self._state_lock:
+            # ── FIX: Atomic state check ──
+            if self._state not in (CallState.SPEAKING, CallState.PROCESSING):
+                return
 
-        # Drain pending sentences (future TTS jobs)
-        drained = 0
-        while not self.audio_out_queue.empty():
-            try:
-                self.audio_out_queue.get_nowait()
-                drained += 1
-            except asyncio.QueueEmpty:
-                break
+            self._interrupt_event.set()
 
-        await self._send_twilio_clear()
-        await self._transition_to(CallState.LISTENING)
-        self._logger.info("barge_in_interrupt", drained_sentences=drained)
+            # Drain pending sentences (future TTS jobs)
+            drained = 0
+            while not self.audio_out_queue.empty():
+                try:
+                    self.audio_out_queue.get_nowait()
+                    drained += 1
+                except asyncio.QueueEmpty:
+                    break
+
+            await self._send_twilio_clear()
+            # Inlined transition to avoid re-locking
+            self._state = CallState.LISTENING
+            self._logger.info("state_transition", from_state="INTERRUPT", to_state="LISTENING")
+            self._logger.info("barge_in_interrupt", drained_sentences=drained)
 
     async def handle_dtmf(self, digit: str) -> None:
         """Route a DTMF digit to the appropriate handler."""
@@ -658,12 +670,15 @@ class Call:
     async def stop(self, status: str = "completed") -> None:
         """Cancel background tasks and transition to ENDED state."""
         async with self._stop_lock:
-            if self._state == CallState.ENDED:
-                return
-            if self._state == CallState.DISCONNECTING:
-                return
+            # ── FIX: Atomic state check within lock ──
+            async with self._state_lock:
+                if self._state == CallState.ENDED:
+                    return
+                if self._state == CallState.DISCONNECTING:
+                    return
+                self._state = CallState.DISCONNECTING
+                self._logger.info("state_transition", from_state="STOP", to_state="DISCONNECTING")
 
-            await self._transition_to(CallState.DISCONNECTING)
             self._running = False
 
             current_task = asyncio.current_task()
@@ -676,7 +691,10 @@ class Call:
                 await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
             self.ended_at = datetime.now(UTC)
-            await self._transition_to(CallState.ENDED)
+            
+            async with self._state_lock:
+                self._state = CallState.ENDED
+                self._logger.info("state_transition", from_state="DISCONNECTING", to_state="ENDED")
 
             MetricsCollector.record_call_ended(
                 status=status,

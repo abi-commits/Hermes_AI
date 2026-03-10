@@ -35,6 +35,7 @@ class ModalRemoteTTSService(AbstractTTSService):
         self._default_embed_watermark = default_embed_watermark
         self._executor: ThreadPoolExecutor | None = None
         self._remote_cls: Any = None
+        self._remote_instance: Any = None
         self._logger = structlog.get_logger(__name__).bind(
             remote_app=app_name,
             remote_class=class_name
@@ -71,15 +72,17 @@ class ModalRemoteTTSService(AbstractTTSService):
             ) from exc
 
     async def _get_remote_instance(self) -> Any:
-        """Create or fetch the remote Modal class instance."""
+        """Fetch or create the remote Modal class instance (cached)."""
+        if self._remote_instance is not None:
+            return self._remote_instance
+
         remote_cls = await self._lookup_remote_cls()
-        # Cls.from_name returns a class that can be instantiated
-        return remote_cls()
+        # Instantiate once and cache
+        self._remote_instance = remote_cls()
+        return self._remote_instance
 
     async def _call_remote_gen(self, method: Any, **kwargs: Any) -> AsyncIterator[bytes]:
         """Invoke a generator Modal method using the definitive aio pattern."""
-        # method here is the bound method instance.method_name
-        # In newer Modal SDKs, we use method.remote_gen.aio(...)
         if not hasattr(method, "remote_gen"):
             raise TTSGenerationError(f"Method {method} does not expose .remote_gen")
 
@@ -113,9 +116,10 @@ class ModalRemoteTTSService(AbstractTTSService):
                 embed_watermark=embed_watermark if embed_watermark is not None else self._default_embed_watermark,
                 chunk_size=effective_chunk_size,
             ):
+                if chunk_count == 0:
+                    self._logger.info("tts_first_chunk_received", text_len=len(text))
+                
                 chunk_count += 1
-                if chunk_count <= 3:
-                    self._logger.debug("yielding_chunk_from_remote", idx=chunk_count, size=len(chunk))
                 yield chunk
 
             self._logger.info("remote_synthesis_stream_complete", total_chunks=chunk_count)
@@ -149,7 +153,8 @@ class ModalRemoteTTSService(AbstractTTSService):
         prompt = str(audio_prompt_path) if audio_prompt_path else None
 
         try:
-            result = await instance.generate.remote.aio(
+            # Consistent aio pattern for unary calls
+            result = await instance.generate.aio(
                 text=text,
                 audio_prompt_path=prompt,
                 embed_watermark=embed_watermark if embed_watermark is not None else self._default_embed_watermark,
@@ -160,14 +165,15 @@ class ModalRemoteTTSService(AbstractTTSService):
             raise TTSGenerationError(f"Remote Modal TTS generation failed: {exc}") from exc
 
     def set_executor(self, executor: ThreadPoolExecutor) -> None:
-        """No-op hook to satisfy the Hermes TTS service interface."""
+        """No-op. Remote service doesn't require a local executor, but satisfies interface."""
         self._executor = executor
 
     async def ping(self) -> bool:
         """Ping the remote worker to verify it is responsive."""
         try:
             instance = await self._get_remote_instance()
-            await instance.get_sample_rate.remote.aio()
+            # Consistent aio pattern
+            await instance.get_sample_rate.aio()
             return True
         except Exception:
             return False

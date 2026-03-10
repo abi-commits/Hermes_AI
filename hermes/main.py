@@ -119,7 +119,11 @@ async def lifespan(app: FastAPI):
     init_task.cancel()
     if hasattr(app.state, "orchestrator"):
         await app.state.orchestrator.shutdown()
-    executor.shutdown(wait=False)
+    
+    # ── FIX: Graceful executor shutdown ──
+    logger.info("shutting_down_executor", wait=True)
+    executor.shutdown(wait=True)
+    
     logger.info("lifespan_ended")
 
 

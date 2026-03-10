@@ -121,8 +121,6 @@ class GeminiLLMService(AbstractLLMService):
             system_instruction=self.system_instruction,
         )
         if tools:
-            # We don't populate a shared _tool_map here anymore to avoid race conditions.
-            # stream_sentences handles its own local tool mapping.
             cfg.tools = self._convert_tools_to_declarations(tools)
         return cfg
 
@@ -275,17 +273,17 @@ class GeminiLLMService(AbstractLLMService):
                 message = prompt
 
             response_iter = await chat.send_message_stream(message)
-            filler_sent = False
             
             while True:
                 found_tool_calls = False
+                filler_sent = False # Reset per hop
                 
                 async for chunk in response_iter:
                     if interruption_check and interruption_check():
                         yield InterruptMarker()
                         return
 
-                    # Detect tool calls (function_calls field in GenerateContentResponse)
+                    # Detect tool calls
                     if chunk.candidates and chunk.candidates[0].content.parts:
                         f_calls = [p.function_call for p in chunk.candidates[0].content.parts if p.function_call]
                         if f_calls:
@@ -314,7 +312,10 @@ class GeminiLLMService(AbstractLLMService):
                                             )
                                         )
                                     )
-                                response_iter = await chat.send_message_stream(tool_responses)
+                                # FIX: Wrap tool responses in Content object
+                                response_iter = await chat.send_message_stream(
+                                    types.Content(role="user", parts=tool_responses)
+                                )
                             break
 
                     if chunk.text:

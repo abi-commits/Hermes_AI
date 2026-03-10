@@ -77,17 +77,20 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
 
                 # Prioritize greeting from customParameters, fallback to settings
                 settings = get_settings()
-                greeting = start_msg.start.custom_parameters.get("greeting") or settings.llm_greeting
+                params = start_msg.start.custom_parameters
+                greeting = params.get("greeting") or settings.llm_greeting
+                test_prompt = params.get("test_prompt") # Extract test prompt
                 
-                config = CallConfig(greeting=greeting)
+                # ── FIX: Pass initial_prompt to config ──
+                config = CallConfig(greeting=greeting, initial_prompt=test_prompt)
                 
-                # Launch connection in background to avoid blocking the receiver
+                # Launch connection in background - no more manual start() call here
                 asyncio.create_task(
                     manager.connect(websocket, start_msg, config=config),
                     name=f"connect-{call_sid}"
                 )
                 
-                logger.info("connection_task_launched", call_sid=call_sid)
+                logger.info("connection_task_launched", call_sid=call_sid, has_test_prompt=bool(test_prompt))
 
             elif event_type == "media":
                 # Media event - process audio

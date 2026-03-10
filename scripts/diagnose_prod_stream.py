@@ -5,11 +5,12 @@ import time
 import base64
 import sys
 
-async def diagnose_stream(local=False):
+async def diagnose_stream(local=False, prompt=None):
+    call_sid = "diag_test_local" if local else "diag_test_prod"
     if local:
-        uri = "ws://localhost:8000/stream/diag_test_local"
+        uri = f"ws://localhost:8000/stream/{call_sid}"
     else:
-        uri = "wss://abinesh3200--hermes-api.modal.run/stream/diag_test_active"
+        uri = f"wss://abinesh3200--hermes-api.modal.run/stream/{call_sid}"
         
     print(f"Connecting to {uri}...")
     
@@ -32,14 +33,19 @@ async def diagnose_stream(local=False):
                 "sequenceNumber": "1",
                 "start": {
                     "accountSid": "AC_LOCAL_TEST",
-                    "callSid": "diag_test_local",
+                    "callSid": call_sid,
                     "streamSid": "MZ_LOCAL_TEST",
                     "tracks": ["inbound"],
                     "customParameters": {
-                        "greeting": "Congratulations! Local system is active."
+                        "greeting": "Congratulations! Production system is active."
                     }
                 }
             }
+            # ── NEW: Inject test prompt into customParameters ──
+            if prompt:
+                handshake["start"]["customParameters"]["test_prompt"] = prompt
+                print(f"📝 Injected Test Prompt: '{prompt}'")
+
             await websocket.send(json.dumps(handshake))
 
             # 3. Priming: Send enough audio to satisfy Deepgram's initial buffers
@@ -71,7 +77,7 @@ async def diagnose_stream(local=False):
             wait_limit = 60.0 if local else 120.0
             global_deadline = time.perf_counter() + wait_limit
             
-            while chunks_received < 50:
+            while chunks_received < 100: # Increase limit for LLM response
                 remaining = global_deadline - time.perf_counter()
                 if remaining <= 0:
                     print("⌛ Global timeout reached.")
@@ -108,7 +114,7 @@ async def diagnose_stream(local=False):
                 "event": "stop",
                 "sequenceNumber": "99",
                 "streamSid": "MZ_LOCAL_TEST",
-                "stop": {"accountSid": "AC_LOCAL_TEST", "callSid": "diag_test_local"}
+                "stop": {"accountSid": "AC_LOCAL_TEST", "callSid": call_sid}
             }))
 
             print("\n--- Diagnostic Results ---")
@@ -123,4 +129,10 @@ async def diagnose_stream(local=False):
 
 if __name__ == "__main__":
     is_local = "--local" in sys.argv
-    asyncio.run(diagnose_stream(local=is_local))
+    prompt = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--prompt" and i + 1 < len(sys.argv):
+            prompt = sys.argv[i+1]
+            break
+            
+    asyncio.run(diagnose_stream(local=is_local, prompt=prompt))
