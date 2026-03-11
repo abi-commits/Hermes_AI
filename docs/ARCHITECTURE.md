@@ -2,83 +2,95 @@
 
 Hermes AI is built on a distributed, asynchronous architecture designed to minimize the delay between a user finishing their sentence and the AI starting its response.
 
-## 1. High-Level Flow Diagram
+## 1. Voice System Flow
 
-The following diagram illustrates the unidirectional flow of data through the Hermes pipeline:
-
-```mermaid
-graph LR
-    User((User)) -- "Audio (mu-law)" --> WS[WebSocket Handler]
-    WS -- "Audio Bytes" --> STT[STT: Deepgram]
-    STT -- "Text Transcript" --> LLM[LLM: Gemini]
-    LLM -- "Tool Call" --> RAG[RAG: ChromaDB]
-    RAG -- "Context" --> LLM
-    LLM -- "Sentences" --> TTS[TTS: Modal GPU]
-    TTS -- "Audio Chunks" --> WS
-    WS -- "Audio (mu-law)" --> User
-```
-
-## 2. Connection Handshake Logic
-
-This diagram shows the non-blocking initialization sequence that prevents handshake timeouts:
+This sequence diagram illustrates the end-to-end lifecycle of a voice interaction:
 
 ```mermaid
 sequenceDiagram
-    participant T as Twilio/User
-    participant H as WebSocket Handler
-    participant O as Orchestrator
-    participant S as Services (LLM/STT/TTS)
+    participant User
+    participant Twilio
+    participant Hermes
+    participant STT as STT: Deepgram
+    participant LLM as LLM: Gemini
+    participant TTS as TTS: Modal GPU
 
-    T->>H: Connect (WSS)
-    H->>T: 101 Switching Protocols (Immediate Accept)
-    T->>H: Send 'start' event
-    H->>O: Initialize Call
-    loop Ready Polling
-        H->>O: Is Orchestrator ready?
-        O-->>H: Yes/No
-    end
-    H->>O: Connect Call
-    O->>S: Startup Background Tasks
-    H->>T: Ready for Media
+    User->>Twilio: Phone call
+    Twilio->>Hermes: WebSocket stream (connected + start)
+    Hermes->>TTS: Greeting (Immediate)
+    Hermes->>STT: Audio stream
+    STT->>Hermes: Transcript
+    Hermes->>LLM: Query
+    LLM->>Hermes: Sentence stream
+    Hermes->>TTS: Speech synthesis
+    TTS->>User: Audio playback
 ```
 
-## 3. Real-Time Conversation Pipeline
+## 2. Internal Component Architecture
 
-The parallel processing logic used to achieve low latency:
+The internal design optimized for high-concurrency and asynchronous task management:
 
 ```mermaid
-graph TD
-    subgraph "Parallel Workers"
-        E[Ears: _stt_task]
-        B[Brain: _llm_task]
-        M[Mouth: _tts_task]
-    end
+flowchart TD
+    WebSocketHandler --> CallOrchestrator
+    CallOrchestrator --> CallInstance
 
-    WS((WebSocket)) -- "Raw Audio" --> E
-    E -- "Transcript" --> B
-    B -- "Sentence" --> M
-    M -- "Synthesized Chunks" --> WS
+    CallInstance --> STTTask[STT Task: _stt_task]
+    CallInstance --> LLMTask[LLM Task: _llm_task]
+    CallInstance --> TTSTask[TTS Task: _tts_task]
 
-    subgraph "Barge-in Mechanism"
-        E -- "Interrupt Marker" --> B
-        B -- "Stop Signal" --> M
-        M -- "clear event" --> WS
-    end
+    TTSTask --> ModalAdapter[ModalRemoteTTSService]
+    ModalAdapter --> ModalGPUWorker[Remote GPU Worker]
 ```
 
-## 4. The Call Lifecycle
+### **Core Components**
 
-### **The Manager: CallOrchestrator**
-The `CallOrchestrator` acts as the global control tower. Its primary responsibilities are:
-*   **Registry:** Maintaining a mapping of all active `Call` objects.
-*   **Service Delivery:** Injecting required services (LLM, TTS, STT) into new calls.
-*   **Fleet Teardown:** Ensuring all sessions are gracefully closed during server shutdown.
+#### **CallOrchestrator**
+Responsible for:
+*   **Fleet Management:** Managing the lifecycle of all active calls.
+*   **Routing:** Directing interrupts and DTMF signals to the correct session.
+*   **Safety:** Ensuring clean teardown and preventing resource leaks.
 
-### **The Pilot: Call Pipeline**
-Every phone call is managed by an individual `Call` instance. This object runs three parallel background tasks:
-1.  **STT Task (The Ears):** Consumes raw mu-law audio from the WebSocket and streams it to Deepgram.
-2.  **LLM Task (The Brain):** Consumes transcripts from STT, triggers RAG tools, and streams sentences.
-3.  **TTS Task (The Mouth):** Consumes sentences from LLM and streams synthesized audio back to the user.
+#### **Call (CallInstance)**
+Responsible for:
+*   **STT Pipeline:** Real-time transcription and voice activity detection.
+*   **LLM Reasoning:** Context assembly, Agentic RAG triggering, and response generation.
+*   **TTS Generation:** Coordinating with the remote GPU for audio synthesis.
+*   **State Machine:** Managing the precise state (`LISTENING`, `SPEAKING`, etc.) of a single session.
+
+## 3. Agentic Retrieval System (RAG)
+
+Hermes uses an "Agentic" approach where the LLM decides when to search the knowledge base:
+
+```mermaid
+flowchart TD
+    Query[User Query] --> LLM[LLM: Gemini]
+    LLM -->|tool call| Search[Knowledge Search]
+    Search --> VDB[(VectorDB: Chroma)]
+    VDB --> Context[Context Results]
+    Context --> LLM
+    LLM --> Response[Final Sentence]
+```
+
+## 4. The Streaming Pipeline
+
+Latency is minimized by streaming data through every stage of the relay race:
+
+```text
+Audio Input (8kHz mu-law)
+↓
+STT streaming (Real-time transcription)
+↓
+Transcript (Buffered sentences)
+↓
+LLM reasoning (Parallel tool execution)
+↓
+Sentence streaming (Immediate TTS handoff)
+↓
+TTS synthesis (GPU-accelerated chunks)
+↓
+Audio output (8kHz mu-law returned to Twilio)
+```
 
 ## 5. Low-Latency Strategies
 
@@ -87,27 +99,11 @@ To provide instant feedback, the system bypasses the LLM for the initial greetin
 *   Handshake starts → Greeting is enqueued directly into the **TTS Task**.
 *   The user hears "Hello" while the LLM and RAG are still initializing in the background.
 
-### **Agentic RAG & Filler Speech**
-When the AI needs to look up information:
-1.  Gemini triggers a `function_call`.
-2.  The service yields a **FillerMarker** (e.g., "One moment, let me check that...").
-3.  The **TTS Task** speaks the filler while the **RAG Service** queries ChromaDB.
-4.  Once data is retrieved, Gemini generates the final answer.
-
 ### **Barge-In (Interruption) Logic**
 Conversation flow is maintained through a high-speed interrupt mechanism:
 *   **Ears** detect speech → **InterruptMarker** is emitted.
 *   **Pipeline** receives marker → Immediately clears the **TTS buffer** and sends a `clear` event to Twilio.
 *   The AI stops talking the instant the user starts.
-
-## 6. Technology Stack
-
-*   **Runtime:** Python 3.11 (Asyncio).
-*   **API:** FastAPI (Asynchronous lifespan management).
-*   **LLM:** Google Gemini 2.5 Flash.
-*   **STT:** Deepgram Nova-2 (Streaming mode).
-*   **TTS:** Custom Chatterbox model on Modal serverless GPUs.
-*   **Vector DB:** ChromaDB (Serverless).
 
 ---
 **Status:** Architecture Hardened
