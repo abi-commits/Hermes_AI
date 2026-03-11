@@ -63,7 +63,6 @@ class AudioProcessingError(HermesError):
 
     pass
 
-    pass
 
 
 class WebSocketError(HermesError):
