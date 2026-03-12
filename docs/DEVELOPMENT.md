@@ -63,5 +63,4 @@ Key metrics to watch:
 *   `hermes_calls_active`: Count of concurrent callers.
 *   `hermes_audio_bytes_total`: Data throughput.
 
----
-**Status:** Developer-Verified
+

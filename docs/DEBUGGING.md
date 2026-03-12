@@ -62,5 +62,3 @@ curl https://<user>--hermes-api.modal.run/ready
 uv run scripts/diagnose_prod_stream.py --prompt "Say hello"
 ```
 
----
-**Status:** Debug-Verified

@@ -54,5 +54,4 @@ To ensure high performance for real-world callers, we use **Warm Infrastructure*
 2.  Configure the **Voice Webhook** to: `https://<user>--hermes-api.modal.run/twilio/voice`.
 3.  The system will automatically generate the TwiML needed to start the bidirectional `<Connect><Stream>` WebSocket.
 
----
-**Status:** Deploy-Verified
+

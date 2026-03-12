@@ -75,22 +75,31 @@ async def handle_websocket(websocket: WebSocket, call_sid: str) -> None:
                     await websocket.close(code=4001, reason="Call SID mismatch")
                     return
 
-                # Prioritize greeting from customParameters, fallback to settings
+                # 1. Extract parameters from handshake
                 settings = get_settings()
                 params = start_msg.start.custom_parameters
-                greeting = params.get("greeting") or settings.llm_greeting
-                test_prompt = params.get("test_prompt") # Extract test prompt
                 
-                # ── FIX: Pass initial_prompt to config ──
-                config = CallConfig(greeting=greeting, initial_prompt=test_prompt)
+                # 2. Build flexible configuration from customParameters
+                config = CallConfig(
+                    greeting=params.get("greeting") or settings.llm_greeting,
+                    initial_prompt=params.get("test_prompt"),
+                    persona=params.get("persona", "default"),
+                    max_history=int(params.get("max_history", 20)),
+                    fallback_phrase=params.get("fallback_phrase", "I'm sorry, I had a problem. Could you repeat that?"),
+                    # Support JSON-string or flat key-value for RAG filtering
+                    rag_metadata_filter=None # Can be expanded if needed
+                )
                 
-                # Launch connection in background - no more manual start() call here
+                # 3. Launch connection in background - no more manual start() call here
                 asyncio.create_task(
                     manager.connect(websocket, start_msg, config=config),
                     name=f"connect-{call_sid}"
                 )
                 
-                logger.info("connection_task_launched", call_sid=call_sid, has_test_prompt=bool(test_prompt))
+                logger.info("connection_task_launched", 
+                            call_sid=call_sid, 
+                            persona=config.persona,
+                            has_test_prompt=bool(config.initial_prompt))
 
             elif event_type == "media":
                 # Media event - process audio

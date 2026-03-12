@@ -105,5 +105,3 @@ Conversation flow is maintained through a high-speed interrupt mechanism:
 *   **Pipeline** receives marker → Immediately clears the **TTS buffer** and sends a `clear` event to Twilio.
 *   The AI stops talking the instant the user starts.
 
----
-**Status:** Architecture Hardened
