@@ -103,6 +103,3 @@ socket.onmessage = (msg) => {
   }
 };
 ```
-
----
-**Status:** Integration Verified
